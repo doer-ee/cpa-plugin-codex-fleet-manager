@@ -851,15 +851,22 @@ func TestStatusPageValidatesSchedulerPriorityBeforePatch(t *testing.T) {
 	}
 }
 
-func TestStatusPageUsesCollapsedSettingsAndNoHardReload(t *testing.T) {
+func TestStatusPageUsesDedicatedSettingsPageAndNoHardReload(t *testing.T) {
 	store := NewPluginState(DefaultConfig())
 	page := renderStatusPageForTest(t, store)
-	if !strings.Contains(page, `<details class="section collapsible" id="settingsPanel" hidden>`) &&
-		!strings.Contains(page, `<details class="panel collapsible" id="settingsPanel" hidden>`) {
-		t.Fatalf("page does not render settings as collapsed details")
-	}
-	if strings.Contains(page, `id="settingsPanel" open`) {
-		t.Fatalf("settings panel is open by default")
+	for _, want := range []string{
+		`id="settingsNav"`,
+		`id="settingsPage" hidden`,
+		`id="settingsMount"`,
+		`id="settingsPanel" hidden`,
+		`settingsMount.append(resetProbeWarning,settingsPanel)`,
+		`window.location.hash==='#settings'`,
+		`showPage('settings',true)`,
+		`data-i18n="nav.backToQueue"`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("page missing dedicated settings marker %q", want)
+		}
 	}
 	if strings.Contains(page, "window.location.reload") {
 		t.Fatalf("page still contains hard reload")
@@ -868,7 +875,6 @@ func TestStatusPageUsesCollapsedSettingsAndNoHardReload(t *testing.T) {
 		t.Fatalf("page still contains scheduled hard reload helper")
 	}
 	for _, want := range []string{
-		`summary-toggle`,
 		`hasManagementKey`,
 		`requestManagement('/status'`,
 		`refreshStatus`,
@@ -881,7 +887,7 @@ func TestStatusPageUsesCollapsedSettingsAndNoHardReload(t *testing.T) {
 		`启动时刷新额度`,
 	} {
 		if !strings.Contains(page, want) {
-			t.Fatalf("page missing collapsed/public refresh marker %q", want)
+			t.Fatalf("page missing dedicated-settings/public refresh marker %q", want)
 		}
 	}
 	settingsStart := strings.Index(page, `id="settingsPanel"`)
