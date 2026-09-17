@@ -171,6 +171,11 @@ jobs:
     name: Build freebsd/amd64
     needs: test
     runs-on: ubuntu-24.04
+    # go-cross/cgo-actions@v1 hardcodes a FreeBSD sysroot that upstream removed
+    # (14.3-RELEASE), so the sysroot is fetched here instead. Bump the preferred
+    # release when FreeBSD drops this one; the job falls forward within 14.x.
+    env:
+      FREEBSD_RELEASE: 14.4-RELEASE
     defaults:
       run:
         shell: bash
@@ -197,26 +202,54 @@ jobs:
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
           echo "ARCHIVE_NAME=${PLUGIN_NAME}_${VERSION}_freebsd_amd64.zip" >> "${GITHUB_ENV}"
 
+      - name: Resolve FreeBSD sysroot release
+        id: freebsd_sysroot
+        run: |
+          set -euo pipefail
+          base_url="https://download.freebsd.org/releases/amd64"
+          release="${FREEBSD_RELEASE}"
+          if ! curl -fsS --head --max-time 60 -o /dev/null "${base_url}/${release}/base.txz" 2>/dev/null; then
+            fallback="$(curl -fsS --max-time 60 "${base_url}/" 2>/dev/null | grep -oE '14\.[0-9]+-RELEASE' | sort -Vu | head -n1 || true)"
+            if [ -z "${fallback}" ]; then
+              echo "::error::no FreeBSD 14.x sysroot is published under ${base_url}" >&2
+              exit 1
+            fi
+            echo "::warning::FreeBSD ${release} is no longer published; using ${fallback}"
+            release="${fallback}"
+          fi
+          echo "release=${release}" >> "${GITHUB_OUTPUT}"
+          echo "triple=x86_64-unknown-freebsd${release%-RELEASE}" >> "${GITHUB_OUTPUT}"
+
+      - name: Prepare FreeBSD sysroot
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          sysroot="${RUNNER_TEMP}/freebsd-sysroot"
+          mkdir -p "${sysroot}"
+          curl -fsSL -o "${RUNNER_TEMP}/base.txz" \
+            "https://download.freebsd.org/releases/amd64/${{ steps.freebsd_sysroot.outputs.release }}/base.txz"
+          sudo tar -xf "${RUNNER_TEMP}/base.txz" -C "${sysroot}"
+          rm -f "${RUNNER_TEMP}/base.txz"
+
       - name: Build FreeBSD shared library
         timeout-minutes: 45
-        uses: go-cross/cgo-actions@v1
         env:
-          GOFLAGS: -trimpath -buildmode=c-shared
-        with:
-          dir: .
-          packages: .
-          targets: freebsd-amd64
-          out-dir: dist/freebsd-amd64
-          output: ${{ env.PLUGIN_NAME }}.so
-          flags: -ldflags=-s -w
-          x-flags: main.pluginVersion=${{ steps.release_metadata.outputs.version }}
+          CGO_ENABLED: '1'
+          CGO_LDFLAGS: -fuse-ld=lld
+          CC: clang --target=${{ steps.freebsd_sysroot.outputs.triple }} --sysroot=${{ runner.temp }}/freebsd-sysroot
+        run: |
+          set -euo pipefail
+          if ! command -v ld.lld >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y lld
+          fi
+          make build VERSION="${VERSION}" GOOS=freebsd GOARCH=amd64
 
       - name: Package plugin
         run: |
           set -euo pipefail
-          rm -f go-cross-bin.h "dist/freebsd-amd64/${PLUGIN_NAME}.h"
           go run ./.github/scripts/package-release.go \
-            -library "dist/freebsd-amd64/${PLUGIN_NAME}.so" \
+            -library "dist/${PLUGIN_NAME}.so" \
             -archive "dist/${ARCHIVE_NAME}" \
             -checksum "dist/${ARCHIVE_NAME}.sha256"
 
