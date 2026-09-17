@@ -60,6 +60,7 @@ type Config struct {
 	// also inert, so shipping the feature cannot change routing by itself.
 	RetryEnabled        bool            `json:"retry_enabled"`
 	RetryShadow         bool            `json:"retry_shadow"`
+	RetryAlways         bool            `json:"retry_always"`
 	RetryMaxAttempts    int             `json:"retry_max_attempts"`
 	RetryStallTimeout   time.Duration   `json:"retry_stall_timeout"`
 	RetryHoldTimeout    time.Duration   `json:"retry_hold_timeout"`
@@ -115,6 +116,7 @@ type rawConfig struct {
 
 	RetryEnabled        *bool           `yaml:"retry_enabled"`
 	RetryShadow         *bool           `yaml:"retry_shadow"`
+	RetryAlways         *bool           `yaml:"retry_always"`
 	RetryMaxAttempts    *int            `yaml:"retry_max_attempts"`
 	RetryStallTimeout   string          `yaml:"retry_stall_timeout"`
 	RetryHoldTimeout    string          `yaml:"retry_hold_timeout"`
@@ -148,6 +150,7 @@ func DefaultConfig() Config {
 
 		RetryEnabled:        false,
 		RetryShadow:         false,
+		RetryAlways:         false,
 		RetryMaxAttempts:    defaultRetryMaxAttempts,
 		RetryStallTimeout:   defaultRetryStallTimeout,
 		RetryHoldTimeout:    defaultRetryHoldTimeout,
@@ -365,6 +368,12 @@ func DecodeConfig(raw []byte) (Config, error) {
 	}
 	if decoded.RetryShadow != nil {
 		cfg.RetryShadow = *decoded.RetryShadow
+	}
+	if decoded.RetryAlways != nil {
+		cfg.RetryAlways = *decoded.RetryAlways
+		if cfg.RetryAlways {
+			cfg.RetryShadow = false
+		}
 	}
 	if decoded.RetryMaxAttempts != nil {
 		if *decoded.RetryMaxAttempts <= 0 || *decoded.RetryMaxAttempts > maxRetryMaxAttempts {
