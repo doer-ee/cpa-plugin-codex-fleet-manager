@@ -2153,6 +2153,8 @@ func TestManagementHTMLIsUncacheableAndAcceptsItsOwnRetryBudgets(t *testing.T) {
 		`id="retryCheckCPA"`,
 		"function checkAndFixCPASettings()",
 		"function requestManagementText(",
+		"function cpaVersionAtLeast(",
+		"v7.3.4",
 		"stream-bootstrap-buffering",
 		"stream-bootstrap-timeout",
 		"bootstrap-retries",

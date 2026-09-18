@@ -2,6 +2,17 @@
 
 [简体中文](README.zh-CN.md) | English
 
+## TL;DR
+
+Codex Fleet Manager is a Codex account scheduling and model failover plugin
+for CLIProxyAPI. It automatically selects the right Codex account based
+on quota and reset time to keep account usage balanced, and retries requests
+against a preconfigured fallback model chain when a model is at capacity,
+overloaded, or an upstream request fails.
+
+
+---------
+
 `codex-fleet-manager` is a dynamic library plugin for CLIProxyAPI (CPA). It
 provides quota-aware scheduling, account-health monitoring, reset-window
 activation, and account annotations for Codex accounts.
@@ -19,6 +30,55 @@ is not an official successor or endorsed release of the original project.
   pressure rather than a static account order.
 - Optional reset-window activation and deadline-driven quota refresh.
 - Bilingual Management UI, account annotations, priorities, and JSON backup.
+
+## v0.3.14 Highlights
+
+- Added the Model Retry Chain page with Live, Shadow, and Always Retry modes.
+- Added ordered, independently numbered fallbacks and automatic routable-model
+  catalog loading with duplicate model IDs removed.
+- Added bilingual retry scheduler logs and a separate Settings page layout.
+- Added CPA `v7.3.4+` version checking and an inline, user-confirmed comparison
+  table for repairing the four stream/retry prerequisites; differences are
+  highlighted in red and the repair uses CPA hot reload.
+
+## Model Retry Chain
+
+The Management UI includes an optional retry chain for upstream capacity and
+transport failures. When enabled, a request that fails before content reaches
+the client can move through configured fallback models. Retryable failures
+include HTTP 429, 502, and 503, capacity/overload failures, and equivalent
+transport failures. A stream that returns HTTP 200 but exposes an upstream
+failure before the response is committed can also be handled by the retry
+runtime.
+
+Open **Retry Chain** from the Fleet Manager navigation. Each requested model
+can have ordered model-only fallbacks; CPA resolves the optional provider.
+Fallbacks are numbered independently for each requested model as `Fallback`,
+`Fallback 2`, `Fallback 3`, and so on.
+
+Retry modes are **Live**, **Shadow** (record only, never retry), and **Always
+retry all models**. Always Retry also covers models without a configured chain;
+when no fallback exists, it retries the same model. Shadow and Always Retry are
+mutually exclusive. The page also configures maximum attempts (including the
+first attempt), silence/hold/chain timeouts, frame and byte buffers, and whether
+encrypted reasoning is removed when switching models.
+
+The page can check and repair the CPA prerequisites, but CPA must be `v7.3.4`
+or newer. If values are wrong, it shows an inline comparison table with current
+and recommended values; differences are marked in red. Nothing changes until
+**Apply recommended settings** is selected. The repair hot-reloads:
+
+```yaml
+request-retry: 3
+codex:
+  stream-bootstrap-buffering: true
+  stream-bootstrap-timeout: "0"
+streaming:
+  bootstrap-retries: 1
+```
+
+No CPA container restart is required. Retry scheduler events are persisted in
+plugin logs and localized in English and Chinese.
 
 ## Included scheduler capabilities
 
@@ -270,12 +330,16 @@ Open **Codex Fleet Manager** from CPA Management Center, or visit:
 The page provides:
 
 - the production-ordered account queue and next-account preview;
+- separate Account Queue, Settings, and Retry Chain pages rather than placing
+  all settings in the middle column;
 - separate CPA priority and plugin priority indicators;
 - quota bars, reset times, availability reasons, and circuit state;
 - quota bars use green at 60% or above, orange from 30% through below 60%, and red below 30% for both quota windows;
 - scheduler settings with plain-language safety guidance;
 - aliases, notes, tags, groups, and per-account plugin priority editing;
-- quota refresh, log viewing/export, and configuration import/export; and
+- quota refresh, log viewing/export, and configuration import/export;
+- automatic loading and de-duplication of routable model IDs when opening the
+  Retry Chain page; and
 - English and Chinese interface switching.
 
 When embedded in CPA Management Center, the plugin initially follows CPA's
