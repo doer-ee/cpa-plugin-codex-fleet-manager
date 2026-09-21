@@ -218,7 +218,7 @@ func handleUsageHandle(raw []byte) ([]byte, error) {
 	if rosterController != nil {
 		go func() { _, _ = rosterController.WakeForActivity(context.Background()) }()
 	}
-	HandleUsageFeedback(globalState, record, now)
+	authFailureFeedback := HandleUsageFeedback(globalState, record, now)
 	evidenceKind := EvidenceUnknown
 	quotaLimitFeedback := false
 	if record.Provider == "codex" && !record.Failed {
@@ -240,7 +240,7 @@ func handleUsageHandle(raw []byte) ([]byte, error) {
 			}
 		}
 	}
-	if quotaLimitFeedback && snapshot != nil {
+	if (quotaLimitFeedback || authFailureFeedback) && snapshot != nil {
 		publishSchedulerState(globalState, snapshot.ActiveHighestTier, now)
 	}
 	return okEnvelope(map[string]any{})
@@ -328,7 +328,7 @@ func startGlobalRefresher() {
 	}
 	refresher.Start()
 	if globalState.Config().RefreshOnStartup {
-		refresher.RefreshSoon()
+		refresher.RequestStartupRefresh()
 	}
 }
 

@@ -16,6 +16,7 @@ const (
 	retryKindRateLimit retryFailureKind = "rate_limit"
 	retryKindStatus    retryFailureKind = "http_status"
 	retryKindTransport retryFailureKind = "transport"
+	retryKindBootstrap retryFailureKind = "provider_bootstrap"
 )
 
 // RetryClassification is the verdict for one observed failure.
@@ -86,6 +87,9 @@ func classifyRetryFailure(text string) RetryClassification {
 	topCode := strings.ToLower(strings.TrimSpace(jsonStringField(body, "code")))
 	lower := strings.ToLower(trimmed)
 
+	if isProviderBootstrapText(errorCode, errorMessage, lower) {
+		return RetryClassification{Retryable: true, Kind: retryKindBootstrap, Reason: "CPA providers are still loading"}
+	}
 	if isModelCapacityText(errorMessage) || isModelCapacityText(lower) {
 		return RetryClassification{Retryable: true, Kind: retryKindCapacity, Reason: "model at capacity"}
 	}
@@ -108,6 +112,13 @@ func classifyRetryFailure(text string) RetryClassification {
 		return RetryClassification{Retryable: true, Kind: retryKindTransport, Reason: marker}
 	}
 	return RetryClassification{Reason: "unrecognized failure"}
+}
+
+func isProviderBootstrapText(errorCode, errorMessage, text string) bool {
+	if !strings.Contains(errorMessage, "unknown provider for model") && !strings.Contains(text, "unknown provider for model") {
+		return false
+	}
+	return errorCode == "" || errorCode == "model_not_found"
 }
 
 // firstNonEmpty returns the first non-empty value, so a nested error shape can

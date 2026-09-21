@@ -8,7 +8,9 @@ Codex Fleet Manager is a Codex account scheduling and model failover plugin
 for CLIProxyAPI. It automatically selects the right Codex account based
 on quota and reset time to keep account usage balanced, and retries requests
 against a preconfigured fallback model chain when a model is at capacity,
-overloaded, or an upstream request fails.
+overloaded, or an upstream request fails. It can also send a Telegram
+notification when one or more accounts enter an HTTP 401 authentication-failure
+state and require re-login.
 
 
 ---------
@@ -40,6 +42,34 @@ is not an official successor or endorsed release of the original project.
 - Added CPA `v7.3.4+` version checking and an inline, user-confirmed comparison
   table for repairing the four stream/retry prerequisites; differences are
   highlighted in red and the repair uses CPA hot reload.
+
+## v0.4.0 Highlights
+
+- Added optional Telegram alerts when one or more Codex accounts require
+  re-login after an HTTP 401 or OAuth `invalid_grant` response.
+- Added transition-based deduplication, 15-second multi-account aggregation,
+  bounded background delivery retries, and automatic re-arming after a
+  successful re-login refresh.
+- Added English/Chinese notification messages and logs, plus a Settings-page
+  test action.
+- Bot Tokens are write-only in the UI and stored separately in a `0600` secret
+  file. They are excluded from status responses, HTML, logs, and configuration
+  exports.
+
+## Telegram Authentication Alerts
+
+Open **Settings → Telegram Notifications**, enter the Bot Token issued by
+BotFather and the destination Chat ID, then use **Test and Save Telegram
+Settings**. Notifications use the plugin language selected at the top of
+the Settings page. A numeric Bot ID alone cannot send
+messages; the complete Bot Token is required.
+
+CFM observes both background quota/token refreshes and CPA request feedback.
+It sends an alert only when an account transitions into authentication failure,
+combines failures detected within 15 seconds, and suppresses repeated alerts
+until a successful account refresh confirms that the account has recovered.
+Telegram delivery runs independently and cannot block account scheduling or
+quota refresh.
 
 ## Model Retry Chain
 
@@ -92,6 +122,11 @@ plugin logs and localized in English and Chinese.
   fallback instead of making an unsafe selection.
 - The active Codex account list is synchronized from CPA's authoritative auth
   roster and restricted to the highest confirmed CPA auth-priority tier.
+- Startup quota refresh is enabled by default and waits for CPA's authoritative
+  roster before running, so installing or updating the plugin does not require
+  a manual **Refresh Quota** action. Requests that land during CPA's brief
+  provider-loading window retry the transient `unknown provider for model`
+  response automatically.
 - Reset-window activation uses a persisted, single-flight sequence that verifies
   the result after one small Codex request. It remains opt-in.
 - The Management UI queue follows the same availability classes and ordering
@@ -294,7 +329,7 @@ stale_after: 5h
 refresh_active_window: 1h
 refresh_after_reset_delay: 1m
 refresh_retry_delays: 1m,5m,15m
-refresh_on_startup: false
+refresh_on_startup: true
 monthly_mode: expiry_order
 fallback: fill-first
 enable_usage_feedback: true
@@ -376,6 +411,12 @@ Local plugin state can contain scheduler settings, quota snapshots, operation
 state, logs, aliases, notes, tags, and group names. Do not put secrets in notes,
 aliases, tags, or group annotations. The Management UI avoids rendering access
 tokens, authorization headers, cookies, and other credential fields.
+
+When CPA exposes its standard `plugins` directory, CFM stores this state under
+`plugins/data/codex-fleet-manager/` so container upgrades retain settings and
+retry chains. Existing state from the historical user-config location is copied
+there automatically without deleting or overwriting either copy. Set
+`CODEX_FLEET_MANAGER_STATE_DIR` to use a different persistent directory.
 
 Resource routes serve UI assets only. Account data and privileged operations use
 Management routes and require the CPA Management key.

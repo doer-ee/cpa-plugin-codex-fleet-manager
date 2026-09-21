@@ -71,6 +71,11 @@ func TestClassifyRetryFailureRecognizesCapacityFrames(t *testing.T) {
 			text: `upstream request failed: {"error":{"type":"service_unavailable_error"}} (see logs)`,
 			kind: retryKindOverload,
 		},
+		{
+			name: "CPA provider bootstrap race",
+			text: `host_call_failed: {"error":{"message":"unknown provider for model gpt-5.6-sol","type":"invalid_request_error","code":"model_not_found"}} (upstream status 400)`,
+			kind: retryKindBootstrap,
+		},
 	}
 	for _, testCase := range cases {
 		verdict := classifyRetryFailure(testCase.text)
@@ -148,6 +153,7 @@ func TestClassifyRetryFailureFailsClosedOnUnknownText(t *testing.T) {
 		`{"error":{"type":"invalid_request_error","message":"unknown parameter temperature"}}`,
 		`{"error":{"type":"authentication_error","message":"invalid api key"}}`,
 		"model gpt-5.6-sol does not exist",
+		`{"error":{"code":"model_not_found","message":"unknown model gpt-5.6-sol"}}`,
 		"the request was rejected because it contains an unsupported field",
 		`{"error":{"message":"context length 128000 exceeded"}}`,
 	}

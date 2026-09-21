@@ -230,6 +230,7 @@ type QuotaRefresher struct {
 	wake                   chan struct{}
 	pendingDue             func() error
 	pendingDueVersion      uint64
+	startupRefreshPending  bool
 	wg                     sync.WaitGroup
 	coordinator            *Coordinator
 	legacyTxn              *LegacyRefreshTxn
@@ -513,6 +514,7 @@ func (r *QuotaRefresher) ObserveRosterLifecycle(active ActiveRoster) {
 	if requested && (owner.normalBackgroundAllowed() || owner.probeBackgroundAllowed()) {
 		owner.Start()
 	}
+	owner.runStartupRefreshIfReady()
 }
 func (r *QuotaRefresher) normalBackgroundAllowed() bool {
 	if r == nil {
@@ -665,6 +667,7 @@ func (r *QuotaRefresher) PublishAuthoritativeRoster(ctx context.Context, roster 
 	if requested {
 		r.Start()
 	}
+	r.runStartupRefreshIfReady()
 	return nil
 }
 
@@ -1542,6 +1545,34 @@ func (r *QuotaRefresher) RefreshSoon() {
 	}()
 }
 
+// RequestStartupRefresh defers the initial quota scan until CPA has published
+// an authoritative roster. Plugin initialization can run before CPA finishes
+// loading auth providers, so calling RefreshSoon directly during registration
+// would otherwise be dropped by the lifecycle gate.
+func (r *QuotaRefresher) RequestStartupRefresh() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.startupRefreshPending = true
+	r.mu.Unlock()
+	r.runStartupRefreshIfReady()
+}
+
+func (r *QuotaRefresher) runStartupRefreshIfReady() {
+	if r == nil || !r.normalBackgroundAllowed() {
+		return
+	}
+	r.mu.Lock()
+	if !r.startupRefreshPending || r.refreshing || r.stopping {
+		r.mu.Unlock()
+		return
+	}
+	r.startupRefreshPending = false
+	r.mu.Unlock()
+	r.RefreshSoon()
+}
+
 func (r *QuotaRefresher) RefreshDueSoon() {
 	if !r.normalBackgroundAllowed() {
 		return
@@ -1698,13 +1729,13 @@ func (r *QuotaRefresher) refreshAuthVersionedHeld(auth pluginapi.HostAuthFileEnt
 		if errors.Is(err, errCPAAdmissionChanged) {
 			return
 		}
-		r.upsertRefreshFailure(account, version, redactSecrets(fmt.Sprintf("get auth: %v", err)), RefreshFailureTransient)
+		r.upsertRefreshFailure(account, version, redactSecrets(fmt.Sprintf("get auth: %v", err)), RefreshFailureTransient, "")
 		return
 	}
 
 	credentials, err := ExtractCodexCredentials(authResp.JSON)
 	if err != nil {
-		r.upsertRefreshFailure(account, version, redactWithCredentials(fmt.Sprintf("extract credentials: %v", err), credentials), RefreshFailureLocal)
+		r.upsertRefreshFailure(account, version, redactWithCredentials(fmt.Sprintf("extract credentials: %v", err), credentials), RefreshFailureLocal, "")
 		return
 	}
 	if accessTokenExpired(credentials, r.now()) {
@@ -1713,7 +1744,8 @@ func (r *QuotaRefresher) refreshAuthVersionedHeld(auth pluginapi.HostAuthFileEnt
 			if errors.Is(err, errCPAAdmissionChanged) {
 				return
 			}
-			r.upsertRefreshFailure(account, version, redactWithCredentials(fmt.Sprintf("refresh access token: %v", err), credentials), refreshTokenFailureKind(err))
+			kind := refreshTokenFailureKind(err)
+			r.upsertRefreshFailure(account, version, redactWithCredentials(fmt.Sprintf("refresh access token: %v", err), credentials), kind, authFailureNotificationReason(err, kind))
 			return
 		}
 	}
@@ -1724,6 +1756,7 @@ func (r *QuotaRefresher) refreshAuthVersionedHeld(auth pluginapi.HostAuthFileEnt
 		account.Refresh = AccountRefreshState{}
 		if r.state.ApplyQuotaRefreshSuccessIfAdmissionCurrent(account, version, r.now()) {
 			publishSchedulerState(r.state, highestTierSet(r.runtimeRoster()), r.now())
+			notifyAuthenticationRecovery(account.AuthID, account.AuthIndex)
 		}
 		return
 	}
@@ -1737,7 +1770,7 @@ func (r *QuotaRefresher) refreshAuthVersionedHeld(auth pluginapi.HostAuthFileEnt
 		if errors.As(err, &statusErr) {
 			kind = refreshFailureKind(statusErr.status)
 		}
-		r.upsertRefreshFailure(account, version, redactWithCredentials(err.Error(), credentials), kind)
+		r.upsertRefreshFailure(account, version, redactWithCredentials(err.Error(), credentials), kind, authFailureNotificationReason(err, kind))
 		return
 	}
 	if resetCredits, err := r.refreshResetCredits(credentials, account.AuthID, version); err != nil {
@@ -1759,6 +1792,7 @@ func (r *QuotaRefresher) refreshAuthVersionedHeld(auth pluginapi.HostAuthFileEnt
 		globalTrials.ObserveEvidence(account.Instance, Evidence{Kind: EvidenceReliableQuotaWriteback, At: r.now()})
 		publishSchedulerState(r.state, highestTierSet(r.runtimeRoster()), r.now())
 		r.recordAdmissionLog(account.AuthID, version, "info", "quota.refresh_success", "账号额度刷新成功", map[string]any{"auth_id": account.AuthID})
+		notifyAuthenticationRecovery(account.AuthID, account.AuthIndex)
 	}
 }
 
@@ -2118,15 +2152,39 @@ func refreshFailureKind(status int) RefreshFailureKind {
 	return RefreshFailureTransient
 }
 
-func (r *QuotaRefresher) upsertRefreshFailure(account AccountState, version uint64, message string, kind RefreshFailureKind) {
+func (r *QuotaRefresher) upsertRefreshFailure(account AccountState, version uint64, message string, kind RefreshFailureKind, notificationReason string) {
 	merged := r.mergeExistingAccount(account)
 	merged.LastRefreshAt = account.LastRefreshAt
 	merged.LastError = message
-	if r.state.ApplyQuotaRefreshFailureIfAdmissionCurrent(merged, version, kind, message, r.now()) {
+	now := r.now()
+	if applied, becameAuthFailure := r.state.ApplyQuotaRefreshFailureTransitionIfAdmissionCurrent(merged, version, kind, message, now); applied {
 		globalTrials.ObserveRetry(merged.Instance, r.now())
 		publishSchedulerState(r.state, highestTierSet(r.runtimeRoster()), r.now())
 		r.recordAdmissionLog(merged.AuthID, version, "warn", "quota.refresh_failed", "账号额度刷新失败", map[string]any{"auth_id": merged.AuthID, "error": message})
+		if becameAuthFailure && notificationReason != "" {
+			notifyAuthenticationFailure(merged, notificationReason, now)
+		}
 	}
+}
+
+func authFailureNotificationReason(err error, kind RefreshFailureKind) string {
+	if kind != RefreshFailureAuth || err == nil {
+		return ""
+	}
+	var tokenStatus tokenRefreshStatusError
+	if errors.As(err, &tokenStatus) {
+		if tokenStatus.status == http.StatusUnauthorized {
+			return "HTTP 401"
+		}
+		if strings.Contains(strings.ToLower(tokenStatus.msg), "invalid_grant") {
+			return "invalid_grant"
+		}
+	}
+	var quotaStatus quotaStatusError
+	if errors.As(err, &quotaStatus) && quotaStatus.status == http.StatusUnauthorized {
+		return "HTTP 401"
+	}
+	return ""
 }
 
 func highestTierSet(roster HostRosterSnapshot) map[string]struct{} {

@@ -361,22 +361,28 @@ func (s *PluginState) RefreshActive(now time.Time) bool {
 }
 
 func (s *PluginState) RecordRefreshFailure(authID, authIndex string, kind RefreshFailureKind, message string, now time.Time) (AccountState, bool) {
+	account, ok, _ := s.RecordRefreshFailureTransition(authID, authIndex, kind, message, now)
+	return account, ok
+}
+
+func (s *PluginState) RecordRefreshFailureTransition(authID, authIndex string, kind RefreshFailureKind, message string, now time.Time) (AccountState, bool, bool) {
 	if now.IsZero() {
 		now = time.Now()
 	}
 	if authID == "" && authIndex == "" {
-		return AccountState{}, false
+		return AccountState{}, false, false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key, account, ok := s.findAccountLocked(authID, authIndex)
 	if !ok {
 		if authID == "" {
-			return AccountState{}, false
+			return AccountState{}, false, false
 		}
 		key = "auth:" + authID
 		account = AccountState{AuthID: authID, AuthIndex: authIndex, Provider: "codex"}
 	}
+	wasAuthFailure := account.Refresh.AuthFailure
 	account.LastError = message
 	account.Refresh.LastFailureKind = kind
 	account.Refresh.LastFailureAt = now
@@ -389,18 +395,26 @@ func (s *PluginState) RecordRefreshFailure(authID, authIndex string, kind Refres
 		account.Refresh.NextRetryAt = now.Add(retryDelayForAttempt(NormalizeConfig(s.cfg), account.Refresh.RetryAttempt))
 	}
 	s.accounts[key] = account
-	return cloneAccountState(account), true
+	becameAuthFailure := !wasAuthFailure && account.Refresh.AuthFailure
+	return cloneAccountState(account), true, becameAuthFailure
 }
 
 func (s *PluginState) ApplyQuotaRefreshFailureIfAdmissionCurrent(account AccountState, version uint64, kind RefreshFailureKind, message string, now time.Time) bool {
+	applied, _ := s.ApplyQuotaRefreshFailureTransitionIfAdmissionCurrent(account, version, kind, message, now)
+	return applied
+}
+
+func (s *PluginState) ApplyQuotaRefreshFailureTransitionIfAdmissionCurrent(account AccountState, version uint64, kind RefreshFailureKind, message string, now time.Time) (bool, bool) {
 	if now.IsZero() {
 		now = time.Now()
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.admissionCurrentLocked(account.AuthID, version) {
-		return false
+		return false, false
 	}
+	_, previous, found := s.findAccountLocked(account.AuthID, account.AuthIndex)
+	wasAuthFailure := found && previous.Refresh.AuthFailure
 	account.Priority = s.cpaAdmission.Priority
 	account.LastError = message
 	account.Refresh.LastFailureKind = kind
@@ -415,10 +429,10 @@ func (s *PluginState) ApplyQuotaRefreshFailureIfAdmissionCurrent(account Account
 	}
 	key := accountStateKey(account)
 	if key == "" {
-		return false
+		return false, false
 	}
 	s.accounts[key] = cloneAccountState(account)
-	return true
+	return true, !wasAuthFailure && account.Refresh.AuthFailure
 }
 
 func (s *PluginState) ApplyQuotaRefreshSuccessIfAdmissionCurrent(account AccountState, version uint64, now time.Time) bool {

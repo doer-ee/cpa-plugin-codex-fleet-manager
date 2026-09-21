@@ -54,6 +54,9 @@ type Config struct {
 	CircuitHalfOpenSuccessThreshold int
 	MaxLogEntries                   int
 	LogRetention                    time.Duration
+	TelegramNotificationsEnabled    bool
+	TelegramChatID                  string
+	TelegramLanguage                string
 
 	// Retry chain. RetryEnabled is the kill switch: when it is false every
 	// request keeps today's behavior. RetryChain is empty by default, which is
@@ -113,6 +116,9 @@ type rawConfig struct {
 	CircuitHalfOpenSuccessThreshold *int   `yaml:"circuit_half_open_success_threshold"`
 	MaxLogEntries                   *int   `yaml:"max_log_entries"`
 	LogRetention                    string `yaml:"log_retention"`
+	TelegramNotificationsEnabled    *bool  `yaml:"telegram_notifications_enabled"`
+	TelegramChatID                  string `yaml:"telegram_chat_id"`
+	TelegramLanguage                string `yaml:"telegram_language"`
 
 	RetryEnabled        *bool           `yaml:"retry_enabled"`
 	RetryShadow         *bool           `yaml:"retry_shadow"`
@@ -141,12 +147,14 @@ func DefaultConfig() Config {
 		RefreshActiveWindow:             time.Hour,
 		RefreshAfterResetDelay:          time.Minute,
 		RefreshRetryDelays:              []time.Duration{time.Minute, 5 * time.Minute, 15 * time.Minute},
-		RefreshOnStartup:                false,
+		RefreshOnStartup:                true,
 		CircuitFailureThreshold:         5,
 		CircuitOpenDuration:             30 * time.Minute,
 		CircuitHalfOpenSuccessThreshold: 2,
 		MaxLogEntries:                   200,
 		LogRetention:                    24 * time.Hour,
+		TelegramNotificationsEnabled:    false,
+		TelegramLanguage:                "en",
 
 		RetryEnabled:        false,
 		RetryShadow:         false,
@@ -199,6 +207,10 @@ func NormalizeConfig(cfg Config) Config {
 	}
 	if cfg.MaxLogEntries <= 0 {
 		cfg.MaxLogEntries = defaults.MaxLogEntries
+	}
+	cfg.TelegramChatID = strings.TrimSpace(cfg.TelegramChatID)
+	if cfg.TelegramLanguage != "en" && cfg.TelegramLanguage != "zh-CN" {
+		cfg.TelegramLanguage = defaults.TelegramLanguage
 	}
 	if cfg.LogRetention <= 0 {
 		cfg.LogRetention = defaults.LogRetention
@@ -362,6 +374,18 @@ func DecodeConfig(raw []byte) (Config, error) {
 			return Config{}, fmt.Errorf("log_retention must be positive")
 		}
 		cfg.LogRetention = d
+	}
+	if decoded.TelegramNotificationsEnabled != nil {
+		cfg.TelegramNotificationsEnabled = *decoded.TelegramNotificationsEnabled
+	}
+	if decoded.TelegramChatID != "" {
+		cfg.TelegramChatID = strings.TrimSpace(decoded.TelegramChatID)
+	}
+	if decoded.TelegramLanguage != "" {
+		if decoded.TelegramLanguage != "en" && decoded.TelegramLanguage != "zh-CN" {
+			return Config{}, fmt.Errorf("telegram_language must be en or zh-CN")
+		}
+		cfg.TelegramLanguage = decoded.TelegramLanguage
 	}
 	if decoded.RetryEnabled != nil {
 		cfg.RetryEnabled = *decoded.RetryEnabled

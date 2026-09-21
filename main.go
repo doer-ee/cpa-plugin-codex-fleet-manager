@@ -124,6 +124,9 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 	if plugin == nil {
 		return 1
 	}
+	if err := migrateLegacyDefaultState(); err != nil {
+		return 1
+	}
 	hostAPI.Store(host)
 	refresherMu.Lock()
 	callHostCallback = callHostCallbackABI
@@ -203,6 +206,13 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 	managementRefreshSoon = refreshGlobalRefresherSoon
 	managementRefreshOneSoon = refreshGlobalRefresherOneSoon
 	refresherMu.Unlock()
+	notifier, notifierErr := NewTelegramNotifier(globalState, telegramSecretPath(defaultStatePath()))
+	if notifierErr == nil {
+		replaceGlobalTelegramNotifier(notifier)
+	} else {
+		replaceGlobalTelegramNotifier(nil)
+		globalState.RecordLog("error", "notification.telegram_state_failed", "Telegram notification state could not be loaded", nil, time.Now())
+	}
 	// The controller is the sole roster synchronization owner. Host callback
 	// readiness during init is not guaranteed, so startup remains asynchronous.
 	go func() {
@@ -276,6 +286,7 @@ func cliproxyPluginFree(ptr unsafe.Pointer, len C.size_t) {
 //export cliproxyPluginShutdown
 func cliproxyPluginShutdown() {
 	stopGlobalPickActivityPump()
+	replaceGlobalTelegramNotifier(nil)
 	refresherMu.Lock()
 	refresher := globalRefresher
 	globalRefresher = nil

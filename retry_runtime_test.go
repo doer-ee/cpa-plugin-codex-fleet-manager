@@ -331,6 +331,31 @@ func TestRunRetryChainRetriesStatusFailures(t *testing.T) {
 	}
 }
 
+func TestRunRetryChainRetriesCPAProviderBootstrapRace(t *testing.T) {
+	cleanupIntegrationGlobals(t)
+	resetRetryTestStats(t)
+	host := installFakeRetryHost(t)
+	host.push(fakeRetryAttempt{err: &hostCallError{Code: "host_call_failed", Message: `{"error":{"message":"unknown provider for model gpt-5.6-sol","type":"invalid_request_error","code":"model_not_found"}}`, Status: 400}})
+	host.push(fakeRetryAttempt{chunks: retryFrames(retryCreatedFrame, retryDeltaFrame, retryDoneFrame)})
+	currentConfig.Store(retryTestConfig(RetryChainRow{
+		Model:     "gpt-5.6-sol",
+		Fallbacks: []RetryTarget{{Model: "gpt-5.6-sol"}},
+	}))
+
+	runRetryChain(context.Background(), retryTestRequest("gpt-5.6-sol"), "plugin-stream")
+
+	requests, emitted, closeError, _ := host.snapshot()
+	if len(requests) != 2 {
+		t.Fatalf("attempts = %d, want 2: provider bootstrap race must be retried", len(requests))
+	}
+	if closeError != "" {
+		t.Fatalf("close error = %q", closeError)
+	}
+	if !strings.Contains(string(joinPayloads(emitted)), "hello") {
+		t.Fatal("the post-bootstrap attempt never reached the client")
+	}
+}
+
 func TestRunRetryChainStopsAtMaxAttempts(t *testing.T) {
 	cleanupIntegrationGlobals(t)
 	resetRetryTestStats(t)

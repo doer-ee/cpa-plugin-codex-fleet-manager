@@ -7,6 +7,56 @@ import (
 	"time"
 )
 
+func TestResolveDefaultStatePathUsesExplicitDirectory(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(stateDirectoryEnvironment, dir)
+	if got, want := resolveDefaultStatePath(), filepath.Join(dir, "state.json"); got != want {
+		t.Fatalf("resolveDefaultStatePath() = %q, want %q", got, want)
+	}
+}
+
+func TestMigrateStateDirectoryCopiesKnownArtifactsWithoutOverwriting(t *testing.T) {
+	source := t.TempDir()
+	destination := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, ".user-data.json"), []byte("source-user-data"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, ".runtime-state.json"), []byte("source-runtime"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, ".telegram-notifications.json"), []byte("source-secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "unrelated.txt"), []byte("ignore"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(destination, ".runtime-state.json"), []byte("existing-runtime"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateStateDirectory(source, destination); err != nil {
+		t.Fatal(err)
+	}
+	assertFileContents := func(name, want string) {
+		t.Helper()
+		raw, err := os.ReadFile(filepath.Join(destination, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := string(raw); got != want {
+			t.Fatalf("%s = %q, want %q", name, got, want)
+		}
+	}
+	assertFileContents(".user-data.json", "source-user-data")
+	assertFileContents(".runtime-state.json", "existing-runtime")
+	assertFileContents(".telegram-notifications.json", "source-secret")
+	if _, err := os.Stat(filepath.Join(destination, "unrelated.txt")); !os.IsNotExist(err) {
+		t.Fatalf("unrelated file migrated: %v", err)
+	}
+	if err := migrateStateDirectory(source, destination); err != nil {
+		t.Fatalf("idempotent migration failed: %v", err)
+	}
+}
+
 func TestLoadPluginDiskStateResetsLegacyNonChatGPTQuotaEndpoint(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	raw := []byte(`{

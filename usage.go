@@ -22,6 +22,22 @@ type QuotaFailureEvent struct {
 	Reason    string
 }
 
+type AuthenticationFailureEvent struct {
+	AuthID    string
+	AuthIndex string
+	Reason    string
+}
+
+func DetectAuthenticationFailure(record pluginapi.UsageRecord) (AuthenticationFailureEvent, bool) {
+	if record.Provider != "codex" || !record.Failed || record.Failure.StatusCode != 401 {
+		return AuthenticationFailureEvent{}, false
+	}
+	if strings.TrimSpace(record.AuthID) == "" && strings.TrimSpace(record.AuthIndex) == "" {
+		return AuthenticationFailureEvent{}, false
+	}
+	return AuthenticationFailureEvent{AuthID: record.AuthID, AuthIndex: record.AuthIndex, Reason: "HTTP 401"}, true
+}
+
 type quotaFailureBody struct {
 	Type            string               `json:"type"`
 	ResetsAt        json.RawMessage      `json:"resets_at"`
@@ -63,13 +79,27 @@ func DetectQuotaFailure(record pluginapi.UsageRecord, now time.Time) (QuotaFailu
 	return event, true
 }
 
-func HandleUsageFeedback(state *PluginState, record pluginapi.UsageRecord, now time.Time) {
-	if state == nil || !state.Config().EnableUsageFeedback {
-		return
+func HandleUsageFeedback(state *PluginState, record pluginapi.UsageRecord, now time.Time) bool {
+	if state == nil {
+		return false
+	}
+	cfg := state.Config()
+	if authEvent, ok := DetectAuthenticationFailure(record); ok && (cfg.EnableUsageFeedback || cfg.TelegramNotificationsEnabled) {
+		account, recorded, becameAuthFailure := state.RecordRefreshFailureTransition(authEvent.AuthID, authEvent.AuthIndex, RefreshFailureAuth, "upstream request returned HTTP 401", now)
+		if recorded {
+			state.RecordLog("warn", "auth.failure", "Account authentication failed and requires re-login", map[string]any{"auth_id": account.AuthID, "auth_index": account.AuthIndex, "status": 401}, now)
+			if becameAuthFailure {
+				notifyAuthenticationFailure(account, authEvent.Reason, now)
+			}
+		}
+		return recorded
+	}
+	if !cfg.EnableUsageFeedback {
+		return false
 	}
 	if record.Provider == "codex" && !record.Failed {
 		if !shouldRecordCircuitSuccess(state, record, now) {
-			return
+			return false
 		}
 		if account, ok := state.RecordAccountSuccess(record.AuthID, record.AuthIndex, now); ok {
 			state.RecordLog("info", "circuit.success", "账号请求成功，熔断状态已更新", map[string]any{
@@ -80,11 +110,11 @@ func HandleUsageFeedback(state *PluginState, record pluginapi.UsageRecord, now t
 				"failure_count": account.Circuit.FailureCount,
 			}, now)
 		}
-		return
+		return false
 	}
 	event, ok := DetectQuotaFailure(record, now)
 	if !ok {
-		return
+		return false
 	}
 	if event.AuthID != "" {
 		state.MarkAccountTemporaryExhausted(event.AuthID, event.ResetAt, event.Reason)
@@ -97,6 +127,7 @@ func HandleUsageFeedback(state *PluginState, record pluginapi.UsageRecord, now t
 		"reason":     event.Reason,
 		"reset_at":   formatTime(event.ResetAt),
 	}, now)
+	return false
 }
 
 func shouldRecordCircuitSuccess(state *PluginState, record pluginapi.UsageRecord, now time.Time) bool {

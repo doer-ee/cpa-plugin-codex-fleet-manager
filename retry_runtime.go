@@ -199,6 +199,7 @@ func runRetryChain(ctx context.Context, req rpcExecutorRequest, streamID string)
 	var lastKind retryFailureKind
 	var lastAttempt attemptResult
 
+attemptLoop:
 	for index := 0; index < attempts; index++ {
 		target, okTarget := plan.Target(index)
 		if !okTarget {
@@ -241,6 +242,12 @@ func runRetryChain(ctx context.Context, req rpcExecutorRequest, streamID string)
 				"reason":          result.reason,
 				"remaining":       len(plan.Remaining(index)),
 			})
+			if result.kind == retryKindBootstrap && index+1 < attempts {
+				if !waitProviderBootstrapRetry(ctx, deadline, index) {
+					lastReason = "retry chain deadline exceeded while waiting for CPA providers"
+					break attemptLoop
+				}
+			}
 			continue
 		default:
 			lastReason = result.reason
@@ -269,6 +276,26 @@ func runRetryChain(ctx context.Context, req rpcExecutorRequest, streamID string)
 		"reason":          lastReason,
 	})
 	finishFailedAttempt(streamID, lastAttempt)
+}
+
+func waitProviderBootstrapRetry(ctx context.Context, deadline time.Time, index int) bool {
+	delay := 250 * time.Millisecond
+	for step := 0; step < index; step++ {
+		delay *= 2
+	}
+	if remaining := time.Until(deadline); remaining <= 0 {
+		return false
+	} else if delay > remaining {
+		delay = remaining
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return time.Now().Before(deadline)
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // finishFailedAttempt ends the request the way today's non-retrying path would
@@ -785,6 +812,10 @@ func decodeNestedChunk(raw json.RawMessage, err error) (pluginapi.HostModelStrea
 func classifyAttemptError(err error) RetryClassification {
 	var callErr *hostCallError
 	if errors.As(err, &callErr) && callErr.Status > 0 {
+		if classified := classifyRetryFailure(callErr.Error()); classified.Retryable {
+			classified.Status = callErr.Status
+			return classified
+		}
 		return classifyRetryStatus(callErr.Status)
 	}
 	return classifyRetryFailure(err.Error())

@@ -99,6 +99,12 @@ type SettingsPayload struct {
 	CircuitHalfOpenSuccessThreshold int         `json:"circuit_half_open_success_threshold"`
 	MaxLogEntries                   int         `json:"max_log_entries"`
 	LogRetention                    string      `json:"log_retention"`
+	TelegramNotificationsEnabled    bool        `json:"telegram_notifications_enabled"`
+	TelegramChatID                  string      `json:"telegram_chat_id"`
+	TelegramLanguage                string      `json:"telegram_language"`
+	TelegramBotToken                string      `json:"telegram_bot_token,omitempty"`
+	TelegramBotTokenConfigured      bool        `json:"telegram_bot_token_configured"`
+	TelegramRemoveBotToken          bool        `json:"telegram_remove_bot_token,omitempty"`
 
 	// Retry chain. Every field is inert until RetryEnabled is on and the chain
 	// has at least one row, so a saved payload that omits them keeps today's
@@ -213,6 +219,7 @@ func RegisterManagement() pluginapi.ManagementRegistrationResponse {
 			{Method: http.MethodPatch, Path: managementBasePath + "/annotations/account", Description: "Update one account annotation."},
 			{Method: http.MethodPatch, Path: managementBasePath + "/annotations/group", Description: "Update one group annotation."},
 			{Method: http.MethodPost, Path: managementBasePath + "/credentials/resolve", Description: "Resolve an active credential ambiguity."},
+			{Method: http.MethodPost, Path: managementBasePath + "/telegram/test", Description: "Send a Telegram test notification."},
 			{Method: http.MethodGet, Path: managementBasePath + "/retry/status", Description: "Retry chain counters and attempt history."},
 		},
 	}
@@ -270,6 +277,8 @@ func handleManagementRequest(store *PluginState, req pluginapi.ManagementRequest
 		return handlePatchGroupAnnotation(store, req, now)
 	case method == http.MethodPost && path == "/credentials/resolve":
 		return handleCredentialResolution(store, req, now, lifecycle)
+	case method == http.MethodPost && path == "/telegram/test":
+		return handleTelegramTest(store, now)
 	default:
 		return jsonManagementResponse(http.StatusNotFound, map[string]string{"error": "not found"})
 	}
@@ -317,6 +326,10 @@ func resourceRouteAllowed(method, path string) bool {
 }
 
 func SettingsFromConfig(cfg Config) SettingsPayload {
+	tokenConfigured := false
+	if notifier := currentTelegramNotifier(); notifier != nil {
+		tokenConfigured = notifier.TokenConfigured()
+	}
 	return SettingsPayload{
 		HandleEnabled:                   cfg.HandleEnabled,
 		MonthlyMode:                     cfg.MonthlyMode,
@@ -336,6 +349,10 @@ func SettingsFromConfig(cfg Config) SettingsPayload {
 		CircuitHalfOpenSuccessThreshold: cfg.CircuitHalfOpenSuccessThreshold,
 		MaxLogEntries:                   cfg.MaxLogEntries,
 		LogRetention:                    cfg.LogRetention.String(),
+		TelegramNotificationsEnabled:    cfg.TelegramNotificationsEnabled,
+		TelegramChatID:                  cfg.TelegramChatID,
+		TelegramLanguage:                cfg.TelegramLanguage,
+		TelegramBotTokenConfigured:      tokenConfigured,
 		RetryEnabled:                    cfg.RetryEnabled,
 		RetryShadow:                     cfg.RetryShadow,
 		RetryAlways:                     cfg.RetryAlways,
@@ -474,6 +491,19 @@ func ConfigFromSettings(base Config, payload SettingsPayload) (Config, error) {
 		}
 		cfg.LogRetention = d
 	}
+	cfg.TelegramNotificationsEnabled = payload.TelegramNotificationsEnabled
+	cfg.TelegramChatID = strings.TrimSpace(payload.TelegramChatID)
+	if payload.TelegramLanguage != "" {
+		if payload.TelegramLanguage != "en" && payload.TelegramLanguage != "zh-CN" {
+			return Config{}, jsonError("telegram_language must be en or zh-CN")
+		}
+		cfg.TelegramLanguage = payload.TelegramLanguage
+	}
+	if cfg.TelegramNotificationsEnabled {
+		if err := validateTelegramChatID(cfg.TelegramChatID); err != nil {
+			return Config{}, jsonError(err.Error())
+		}
+	}
 	cfg.RetryEnabled = payload.RetryEnabled
 	cfg.RetryShadow = payload.RetryShadow
 	cfg.RetryAlways = payload.RetryAlways
@@ -553,9 +583,32 @@ func handlePutSettings(store *PluginState, req pluginapi.ManagementRequest, now 
 
 func saveSettingsPayload(store *PluginState, payload SettingsPayload) pluginapi.ManagementResponse {
 	previousRisk := store.Config().ProbeOnProvisionalRoster
+	if payload.TelegramRemoveBotToken {
+		payload.TelegramNotificationsEnabled = false
+		payload.TelegramChatID = ""
+		payload.TelegramBotToken = ""
+	}
 	cfg, err := ConfigFromSettings(store.Config(), payload)
 	if err != nil {
 		return jsonManagementResponse(http.StatusBadRequest, map[string]string{"error": err.Error()})
+	}
+	notifier := currentTelegramNotifier()
+	if strings.TrimSpace(payload.TelegramBotToken) != "" && notifier == nil {
+		return jsonManagementResponse(http.StatusServiceUnavailable, map[string]string{"error": "Telegram notifier is unavailable"})
+	}
+	if cfg.TelegramNotificationsEnabled {
+		tokenAvailable := notifier != nil && notifier.TokenConfigured()
+		if strings.TrimSpace(payload.TelegramBotToken) != "" && !payload.TelegramRemoveBotToken {
+			tokenAvailable = true
+		}
+		if payload.TelegramRemoveBotToken || !tokenAvailable {
+			return jsonManagementResponse(http.StatusBadRequest, map[string]string{"error": "Telegram Bot Token is required when notifications are enabled"})
+		}
+	}
+	if notifier != nil {
+		if err := notifier.UpdateToken(payload.TelegramBotToken, payload.TelegramRemoveBotToken); err != nil {
+			return jsonManagementResponse(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
 	}
 	disk := diskStateFromStore(store)
 	disk.Config = cfg
@@ -568,6 +621,18 @@ func saveSettingsPayload(store *PluginState, payload SettingsPayload) pluginapi.
 		managementProvisionalRiskChanged(cfg.ProbeOnProvisionalRoster)
 	}
 	return jsonManagementResponse(http.StatusOK, SettingsFromConfig(cfg))
+}
+
+func handleTelegramTest(store *PluginState, now time.Time) pluginapi.ManagementResponse {
+	notifier := currentTelegramNotifier()
+	if notifier == nil {
+		return jsonManagementResponse(http.StatusServiceUnavailable, map[string]string{"error": "Telegram notifier is unavailable"})
+	}
+	if err := notifier.SendTest(context.Background()); err != nil {
+		store.RecordLog("error", "notification.telegram_test_failed", "Telegram test notification failed", nil, now)
+		return jsonManagementResponse(http.StatusBadGateway, map[string]string{"error": err.Error()})
+	}
+	return jsonManagementResponse(http.StatusOK, map[string]bool{"ok": true})
 }
 
 type refreshAccountPayload struct {
@@ -615,6 +680,15 @@ func handleImportState(store *PluginState, body []byte, now time.Time) pluginapi
 		return jsonManagementResponse(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
 	state = normalizePluginDiskState(state)
+	if state.Config.TelegramNotificationsEnabled {
+		if err := validateTelegramChatID(state.Config.TelegramChatID); err != nil {
+			return jsonManagementResponse(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		notifier := currentTelegramNotifier()
+		if notifier == nil || !notifier.TokenConfigured() {
+			return jsonManagementResponse(http.StatusBadRequest, map[string]string{"error": "configure a Telegram Bot Token before importing enabled Telegram notifications"})
+		}
+	}
 	if err := SaveUserData(semanticStatePaths(defaultStatePath()).UserData, state); err != nil {
 		return jsonManagementResponse(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
@@ -783,6 +857,13 @@ func emptyStatePayload(snapshot StateSnapshot, refreshActive bool) EmptyStatePay
 		}
 	}
 	if snapshot.LastCodexActivityAt.IsZero() {
+		if cfg.RefreshOnStartup {
+			return EmptyStatePayload{
+				Reason:  "startup_refresh",
+				Title:   "正在初始化账号额度",
+				Message: "启动刷新已启用。插件正在等待 CPA 完成账号加载，然后会自动获取额度，无需手动点击刷新。",
+			}
+		}
 		return EmptyStatePayload{
 			Reason:  "sleeping_no_activity",
 			Title:   "调度器处于休眠状态",
@@ -1373,6 +1454,7 @@ var statusTemplateV2 = template.Must(template.New("status-v2").Funcs(template.Fu
 .retryChainSummaryTitle{font-weight:650;color:#111827}
 .retryChainLine{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}
 .retryCPAConfirm{margin-top:12px;padding-top:12px;border-top:1px solid #eef0f3}.retryCPAConfirm strong{display:block;margin-bottom:8px;color:#111827}.retryCPAConfirm table{width:100%;border-collapse:collapse;font-size:12px;margin:8px 0 12px}.retryCPAConfirm th,.retryCPAConfirm td{border:1px solid #e5e7eb;padding:7px 8px;text-align:left}.retryCPAConfirm th{background:#f9fafb;color:#4b5563}.retryCPAConfirm .diff{color:#b91c1c;background:#fef2f2;font-weight:650}
+.settingsSection{border-top:1px solid #e5e7eb;margin-top:8px;padding-top:16px}.settingsSection h3{margin:0 0 5px;font-size:15px;color:#111827}.telegramGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 20px;margin-top:12px}.telegramGrid .wide{grid-column:1/-1}.secretStatus{font-size:12px;color:#6b7280;margin:-5px 0 12px}.secretStatus.configured{color:#166534}@media(max-width:860px){.telegramGrid{grid-template-columns:1fr}.telegramGrid .wide{grid-column:auto}}
 </style>
 </head>
 <body>
@@ -1380,13 +1462,13 @@ var statusTemplateV2 = template.Must(template.New("status-v2").Funcs(template.Fu
 <aside class="sidebar">
 <div class="brand"><h1 data-i18n="app.title">Codex Fleet Manager</h1><p data-i18n="app.subtitle">优化版 Fill First。配置、别名、分组、标签和备注由插件内部状态文件保存。</p></div>
 <nav class="pageNav" aria-label="页面导航"><button id="queueNav" type="button" class="active" data-i18n="nav.queue">账号队列</button><button id="settingsNav" type="button" data-i18n="nav.settings">调度设置</button><button id="retryNav" type="button" data-i18n="nav.retry">模型重试链</button></nav>
-<label class="field"><span data-i18n="app.language">界面语言</span><select id="localeSelect"><option value="zh-CN">中文</option><option value="en">English</option></select></label>
 <label class="field" id="managementKeyField"><span data-i18n="connection.managementKey">CPA 管理密钥</span><input id="managementKey" type="password" autocomplete="off" spellcheck="false"></label>
 <div class="setting-with-help"><label class="toggle"><span data-i18n="connection.rememberManagementKey">在此浏览器中记住管理密钥</span><input id="rememberManagementKey" type="checkbox"></label><p class="setting-help" data-i18n="connection.rememberManagementKeyHelp">密钥将以未加密形式保存在浏览器本地存储中。请仅在受信任的设备上启用。</p></div>
 <div class="actions primary-actions"><button id="loadData" type="button" data-i18n="actions.loadData">加载数据</button><button id="refreshQuota" type="button" class="secondary" data-i18n="actions.refreshQuota" hidden>刷新额度</button></div>
 <div class="notice staticHint" data-i18n="connection.backgroundHint">只要调度器启动了，它就会在后台自动运行，无需保持页面开启。</div>
 <div class="warning" id="resetProbeWarning" hidden><strong data-i18n="resetProbe.warningTitle">自动激活新的额度周期默认关闭</strong><span data-i18n="resetProbe.warningBody">开启后，调度器会在额度重置时间已到但新周期尚未生成时，发送一次极小的 Codex 请求尝试激活新周期。</span></div>
 <section class="settingsGrid" id="settingsPanel" hidden>
+<div class="setting-with-help wide"><label class="field"><span data-i18n="app.language">语言</span><select id="localeSelect"><option value="zh-CN">中文</option><option value="en">English</option></select></label><p class="setting-help" data-i18n="settings.languageHelp">同时用于插件界面和 Telegram 通知。</p></div>
 <label class="toggle"><span data-i18n="settings.handleEnabled">启用调度接管</span><input id="handleEnabled" type="checkbox"></label>
 <label class="toggle"><span data-i18n="settings.usageFeedback">失败反馈标记额度耗尽</span><input id="usageFeedback" type="checkbox"></label>
 <div class="setting-with-help wide"><label class="toggle"><span data-i18n="settings.enableResetProbe">自动激活新的额度周期</span><input id="enableResetProbe" name="enable_reset_probe" type="checkbox"></label><p class="setting-help" data-i18n="settings.enableResetProbeHelp">即使普通刷新处于休眠状态，Probe 也会按额度刷新间隔执行只读检查，最短 30 分钟；只有检测到延迟启动的重置窗口时，才发送一次极小请求。可能消耗少量额度。</p></div>
@@ -1404,6 +1486,15 @@ var statusTemplateV2 = template.Must(template.New("status-v2").Funcs(template.Fu
 <label class="field"><span data-i18n="settings.circuitHalfOpenSuccessThreshold">半开恢复成功次数</span><input id="circuitHalfOpenSuccessThreshold" type="number" min="1" step="1"></label>
 <label class="field"><span data-i18n="settings.maxLogEntries">最大日志条数</span><input id="maxLogEntries" type="number" min="1" step="1"></label>
 <label class="field"><span data-i18n="settings.logRetention">日志保留时间</span><input id="logRetention" spellcheck="false"></label>
+<div class="wide settingsSection"><h3 data-i18n="telegram.title">Telegram 通知</h3><p class="setting-help" data-i18n="telegram.help">当一个或多个 Codex 账号出现 HTTP 401 或 invalid_grant 并需要重新登录时发送通知。15 秒内的事件会合并成一条消息。</p><div class="telegramGrid">
+<label class="toggle wide"><span data-i18n="telegram.enabled">启用认证失败通知</span><input id="telegramEnabled" type="checkbox"></label>
+<label class="field"><span data-i18n="telegram.botToken">Telegram Bot Token</span><input id="telegramBotToken" type="password" autocomplete="new-password" spellcheck="false" data-i18n-placeholder="telegram.botTokenPlaceholder" placeholder="留空以保留已保存的 Token"></label>
+<label class="field"><span data-i18n="telegram.chatID">Telegram Chat ID</span><input id="telegramChatID" spellcheck="false" placeholder="-1001234567890"></label>
+<p class="secretStatus" id="telegramTokenStatus"></p><span></span>
+<div class="setting-with-help"><label class="toggle"><span data-i18n="telegram.removeToken">保存时删除 Bot Token</span><input id="telegramRemoveToken" type="checkbox"></label><p class="setting-help" data-i18n="telegram.removeTokenHelp">勾选后会关闭通知并清空 Bot Token 和 Chat ID；保存后生效。</p></div>
+<div class="actions wide"><button id="telegramTest" type="button" class="secondary" data-i18n="telegram.test">测试并保存 Telegram 设置</button></div>
+<p class="setting-help wide" id="telegramTestStatus"></p>
+</div></div>
 <div class="actions settingsActions wide"><button id="saveSettings" type="button" data-i18n="actions.saveSettings">保存设置</button><button id="exportConfig" type="button" class="ghost" data-i18n="actions.exportConfig">导出配置</button><button id="importConfig" type="button" class="ghost" data-i18n="actions.importConfig">导入配置</button><input id="importFile" type="file" accept="application/json,.json" hidden></div>
 </section>
 <div id="notice" class="notice" hidden></div>
@@ -1485,6 +1576,51 @@ const TRANSLATIONS={
     'notice.settingsSaved':'设置已保存，页面内容会自动更新。','notice.statusLoaded':'已加载当前设置。请确认后再次保存。','notice.refreshRequested':'已请求后台刷新额度，页面内容会自动更新。','notice.accountSaved':'账号卡片已保存，页面内容会自动更新。','notice.accountPinned':'账号已固定，插件优先级已设为 999。','notice.accountUnpinned':'已取消固定，插件优先级已重置为 0。','notice.refreshOneRequested':'已请求刷新该账号额度，页面内容会自动更新。','notice.configExported':'配置已导出。','notice.logsExported':'日志已导出。','notice.configImported':'配置已导入，页面内容会自动更新。','error.requestFailed':'请求失败：{status}','error.managementKeyRequired':'需要填写 CPA 管理密钥','error.schedulerPriorityInteger':'插件优先级必须是安全整数。'
   }
 };
+TRANSLATIONS.en['telegram.title']='Telegram Notifications';
+TRANSLATIONS.en['telegram.help']='Send a notification in the plugin language when one or more Codex accounts receive HTTP 401 or invalid_grant and require re-login. Events within 15 seconds are combined.';
+TRANSLATIONS.en['settings.languageHelp']='Used for both the plugin interface and Telegram notifications.';
+TRANSLATIONS.en['telegram.enabled']='Enable authentication-failure notifications';
+TRANSLATIONS.en['telegram.botToken']='Telegram Bot Token';
+TRANSLATIONS.en['telegram.botTokenPlaceholder']='Leave blank to keep the saved token';
+TRANSLATIONS.en['telegram.chatID']='Telegram Chat ID';
+TRANSLATIONS.en['telegram.removeToken']='Remove Bot Token when saving';
+TRANSLATIONS.en['telegram.removeTokenHelp']='Checking this disables notifications and clears the Bot Token and Chat ID when settings are saved.';
+TRANSLATIONS.en['telegram.test']='Test and Save Telegram Settings';
+TRANSLATIONS.en['telegram.tokenConfigured']='Bot Token configured';
+TRANSLATIONS.en['telegram.tokenMissing']='Bot Token not configured';
+TRANSLATIONS.en['telegram.testSending']='Saving settings and sending a test notification...';
+TRANSLATIONS.en['telegram.testSent']='Telegram test notification sent.';
+TRANSLATIONS.en['telegram.disabled']='Telegram Disabled';
+TRANSLATIONS.en['log.auth.failure']='Account authentication failed and requires re-login';
+TRANSLATIONS.en['log.notification.telegram_queued']='Telegram authentication alert queued';
+TRANSLATIONS.en['log.notification.telegram_sent']='Telegram authentication alert sent';
+TRANSLATIONS.en['log.notification.telegram_failed']='Telegram authentication alert delivery failed';
+TRANSLATIONS.en['log.notification.telegram_test_sent']='Telegram test notification sent';
+TRANSLATIONS.en['log.notification.telegram_test_failed']='Telegram test notification failed';
+TRANSLATIONS.en['log.notification.telegram_state_failed']='Telegram notification state could not be saved';
+TRANSLATIONS['zh-CN']['telegram.title']='Telegram 通知';
+TRANSLATIONS['zh-CN']['telegram.help']='当一个或多个 Codex 账号出现 HTTP 401 或 invalid_grant 并需要重新登录时，使用插件语言发送通知。15 秒内的事件会合并成一条消息。';
+TRANSLATIONS['zh-CN']['app.language']='语言';
+TRANSLATIONS['zh-CN']['settings.languageHelp']='同时用于插件界面和 Telegram 通知。';
+TRANSLATIONS['zh-CN']['telegram.enabled']='启用认证失败通知';
+TRANSLATIONS['zh-CN']['telegram.botToken']='Telegram Bot Token';
+TRANSLATIONS['zh-CN']['telegram.botTokenPlaceholder']='留空以保留已保存的 Token';
+TRANSLATIONS['zh-CN']['telegram.chatID']='Telegram Chat ID';
+TRANSLATIONS['zh-CN']['telegram.removeToken']='保存时删除 Bot Token';
+TRANSLATIONS['zh-CN']['telegram.removeTokenHelp']='勾选后会关闭通知并清空 Bot Token 和 Chat ID；保存后生效。';
+TRANSLATIONS['zh-CN']['telegram.test']='测试并保存 Telegram 设置';
+TRANSLATIONS['zh-CN']['telegram.tokenConfigured']='Bot Token 已配置';
+TRANSLATIONS['zh-CN']['telegram.tokenMissing']='Bot Token 未配置';
+TRANSLATIONS['zh-CN']['telegram.testSending']='正在保存设置并发送测试通知…';
+TRANSLATIONS['zh-CN']['telegram.testSent']='Telegram 测试通知已发送。';
+TRANSLATIONS['zh-CN']['telegram.disabled']='Telegram 已禁用';
+TRANSLATIONS['zh-CN']['log.auth.failure']='账号认证失败，需要重新登录';
+TRANSLATIONS['zh-CN']['log.notification.telegram_queued']='Telegram 认证告警已进入发送队列';
+TRANSLATIONS['zh-CN']['log.notification.telegram_sent']='Telegram 认证告警已发送';
+TRANSLATIONS['zh-CN']['log.notification.telegram_failed']='Telegram 认证告警发送失败';
+TRANSLATIONS['zh-CN']['log.notification.telegram_test_sent']='Telegram 测试通知已发送';
+TRANSLATIONS['zh-CN']['log.notification.telegram_test_failed']='Telegram 测试通知发送失败';
+TRANSLATIONS['zh-CN']['log.notification.telegram_state_failed']='Telegram 通知状态保存失败';
 TRANSLATIONS.en['retry.always']='Always retry all models';
 TRANSLATIONS.en['retry.alwaysHelp']='Retry every model, including models without a configured chain. When no fallback is configured, retry the same model. Mutually exclusive with Shadow mode.';
 TRANSLATIONS.en['retry.modes']='Shadow mode and Always retry cannot both be enabled.';
@@ -1607,6 +1743,7 @@ const INLINE_TRANSLATIONS=[
   ['调度器处于休眠状态','The scheduler is sleeping'],['最近 ','No Codex requests were observed in the last '],[' 内没有观察到 Codex 请求',''],['系统暂不主动扫描账号','the system will not actively scan accounts'],['发送第一次 Codex 请求后将自动获取账号额度信息','Send the first Codex request to fetch account quota automatically'],
   ['内没有 Codex 请求，调度器已暂停后台刷新',' without a Codex request, so background refresh is paused'],['发送一次 Codex 请求后会重新进入活跃窗口并获取账号额度信息','Send one Codex request to re-enter the active window and fetch account quota'],
   ['等待账号额度数据','Waiting for account quota data'],['已观察到 Codex 请求，调度器处于活跃窗口','A Codex request was observed and the scheduler is in its active window'],['账号额度刷新完成后，这里会显示账号卡片','Account cards will appear here after quota refresh finishes'],['等待额度刷新后，这里会显示账号卡片','Account cards will appear here after quota refresh'],
+  ['正在初始化账号额度','Initializing account quotas'],['启动刷新已启用。插件正在等待 CPA 完成账号加载，然后会自动获取额度，无需手动点击刷新。','Startup refresh is enabled. The plugin is waiting for CPA to finish loading accounts, then it will fetch quota automatically; no manual refresh is needed.'],
   ['认证信息异常，请重新登录。','Authentication looks invalid. Please re-login.'],['上次额度刷新失败，调度器正在等待下次自动重试。','The last quota refresh failed. The scheduler is waiting for the next automatic retry.'],
   ['账号额度已过期，调度器处于活跃窗口，将按刷新队列更新。','Quota data is stale. The scheduler is active and will update it through the refresh queue.'],['账号尚未获取额度信息，调度器处于活跃窗口，将按刷新队列更新。','Quota has not been fetched yet. The scheduler is active and will update it through the refresh queue.'],
   ['上次额度刷新失败，当前已到重试时间。','The last quota refresh failed, and retry is due now.'],['额度重置时间已到，调度器将按刷新队列更新。','Quota reset time has arrived; the scheduler will update it through the refresh queue.'],
@@ -1633,7 +1770,7 @@ function labelDueReason(reason){return labelFrom(DUE_REASON_LABELS,reason,reason
 function labelUnavailableReason(reason){return labelFrom(UNAVAILABLE_REASON_LABELS,reason,reason||'不可用')}
 function translateInlineText(raw){let text=String(raw||'');if(currentLocale!=='en')return text;for(const pair of SORTED_INLINE_TRANSLATIONS){text=text.split(pair[0]).join(pair[1])}return text}
 function applyInlineTranslations(){const nodes=document.querySelectorAll('.badge,.quota-title,.quota-remaining,.quota-reset,.kv span,.cardActions button,.empty,.empty strong,.empty div');for(const node of nodes){if(node.children.length>0)continue;if(!node.dataset.rawText)node.dataset.rawText=node.textContent;node.textContent=translateInlineText(node.dataset.rawText)}formatLocalTimes()}
-function applyLocale(){document.documentElement.lang=currentLocale;document.title=t('app.title');localeSelect.value=currentLocale;for(const node of document.querySelectorAll('[data-i18n]')){node.textContent=t(node.dataset.i18n)}for(const node of document.querySelectorAll('[data-i18n-aria]')){node.setAttribute('aria-label',t(node.dataset.i18nAria))}for(const node of document.querySelectorAll('.localeColon'))node.textContent=currentLocale==='en'?': ':'：';if(notice.dataset.i18nKey)notice.textContent=t(notice.dataset.i18nKey);for(const container of document.querySelectorAll('.retryFallbacks'))renumberRetryFallbacks(container);renderMetrics();renderAccounts(STATUS.accounts||[]);applyInlineTranslations();renderLogs(STATUS.logs||[])}
+function applyLocale(){document.documentElement.lang=currentLocale;document.title=t('app.title');localeSelect.value=currentLocale;for(const node of document.querySelectorAll('[data-i18n]')){node.textContent=t(node.dataset.i18n)}for(const node of document.querySelectorAll('[data-i18n-placeholder]')){node.setAttribute('placeholder',t(node.dataset.i18nPlaceholder))}for(const node of document.querySelectorAll('[data-i18n-aria]')){node.setAttribute('aria-label',t(node.dataset.i18nAria))}for(const node of document.querySelectorAll('.localeColon'))node.textContent=currentLocale==='en'?': ':'：';if(notice.dataset.i18nKey)notice.textContent=t(notice.dataset.i18nKey);for(const container of document.querySelectorAll('.retryFallbacks'))renumberRetryFallbacks(container);renderMetrics();renderAccounts(STATUS.accounts||[]);applyInlineTranslations();renderLogs(STATUS.logs||[]);updateTelegramTokenStatus()}
 function changeLocale(locale){currentLocale=normalizeLocale(locale);try{window.localStorage.setItem(LOCALE_STORAGE_KEY,currentLocale)}catch(error){}applyLocale()}
 let restoredManagementKey=false;
 function syncManagementKeyVisibility(){const field=document.getElementById('managementKeyField');const remember=document.getElementById('rememberManagementKey');if(field&&remember)field.hidden=remember.checked&&restoredManagementKey}
@@ -1655,7 +1792,7 @@ async function refreshStatus(options){const opts=options||{};const data=await re
 function startStatusPolling(){if(statusPollID)return;statusPollID=window.setInterval(()=>refreshStatus({management:true}).catch(()=>{}),15000)}
 async function loadStatus(){try{await refreshStatus({management:true,fillSettings:true});const remember=document.getElementById('rememberManagementKey');if(remember&&remember.checked&&hasManagementKey()){restoredManagementKey=true;syncManagementKeyVisibility()}showNotice(t('notice.statusLoaded'),false,'notice.statusLoaded');startStatusPolling()}catch(error){showNotice(error.message||String(error),true)}}
 async function pollStatus(times,delayMs){for(let i=0;i<times;i++){await new Promise((resolve)=>window.setTimeout(resolve,delayMs));await refreshStatus()}}
-function collectSettingsPayload(){return{handle_enabled:document.getElementById('handleEnabled').checked,enable_usage_feedback:document.getElementById('usageFeedback').checked,enable_reset_probe:document.getElementById('enableResetProbe').checked,probe_on_provisional_roster:document.getElementById('probeOnProvisionalRoster').checked,monthly_mode:document.getElementById('monthlyMode').value,quota_refresh_interval:document.getElementById('refreshInterval').value.trim(),stale_after:document.getElementById('staleAfter').value.trim(),refresh_active_window:document.getElementById('refreshActiveWindow').value.trim(),refresh_after_reset_delay:document.getElementById('refreshAfterResetDelay').value.trim(),refresh_retry_delays:document.getElementById('refreshRetryDelays').value.trim(),refresh_on_startup:document.getElementById('refreshOnStartup').checked,max_refresh_concurrency:Number.parseInt(document.getElementById('maxConcurrency').value,10)||1,circuit_failure_threshold:Number.parseInt(document.getElementById('circuitFailureThreshold').value,10)||5,circuit_open_duration:document.getElementById('circuitOpenDuration').value.trim(),circuit_half_open_success_threshold:Number.parseInt(document.getElementById('circuitHalfOpenSuccessThreshold').value,10)||2,max_log_entries:Number.parseInt(document.getElementById('maxLogEntries').value,10)||200,log_retention:document.getElementById('logRetention').value.trim(),retry_enabled:retryElement('retryEnabled').checked===true,retry_shadow:retryElement('retryShadow').checked===true,retry_always:retryElement('retryAlways').checked===true,retry_strip_reasoning:retryElement('retryStripReasoning').checked!==false,retry_max_attempts:retryIntValue('retryMaxAttempts',4),retry_max_frames:retryIntValue('retryMaxFrames',4096),retry_stall_timeout:retryDurationValue('retryStallTimeout','60s'),retry_hold_timeout:retryDurationValue('retryHoldTimeout','90s'),retry_chain_deadline:retryDurationValue('retryChainDeadline','240s'),retry_max_bytes:retryTextValue('retryMaxBytes','8MB'),retry_chain:collectRetryChainRows()}}
+function collectSettingsPayload(){return{handle_enabled:document.getElementById('handleEnabled').checked,enable_usage_feedback:document.getElementById('usageFeedback').checked,enable_reset_probe:document.getElementById('enableResetProbe').checked,probe_on_provisional_roster:document.getElementById('probeOnProvisionalRoster').checked,monthly_mode:document.getElementById('monthlyMode').value,quota_refresh_interval:document.getElementById('refreshInterval').value.trim(),stale_after:document.getElementById('staleAfter').value.trim(),refresh_active_window:document.getElementById('refreshActiveWindow').value.trim(),refresh_after_reset_delay:document.getElementById('refreshAfterResetDelay').value.trim(),refresh_retry_delays:document.getElementById('refreshRetryDelays').value.trim(),refresh_on_startup:document.getElementById('refreshOnStartup').checked,max_refresh_concurrency:Number.parseInt(document.getElementById('maxConcurrency').value,10)||1,circuit_failure_threshold:Number.parseInt(document.getElementById('circuitFailureThreshold').value,10)||5,circuit_open_duration:document.getElementById('circuitOpenDuration').value.trim(),circuit_half_open_success_threshold:Number.parseInt(document.getElementById('circuitHalfOpenSuccessThreshold').value,10)||2,max_log_entries:Number.parseInt(document.getElementById('maxLogEntries').value,10)||200,log_retention:document.getElementById('logRetention').value.trim(),telegram_notifications_enabled:document.getElementById('telegramEnabled').checked===true,telegram_chat_id:document.getElementById('telegramChatID').value.trim(),telegram_language:currentLocale,telegram_bot_token:document.getElementById('telegramBotToken').value.trim(),telegram_remove_bot_token:document.getElementById('telegramRemoveToken').checked===true,retry_enabled:retryElement('retryEnabled').checked===true,retry_shadow:retryElement('retryShadow').checked===true,retry_always:retryElement('retryAlways').checked===true,retry_strip_reasoning:retryElement('retryStripReasoning').checked!==false,retry_max_attempts:retryIntValue('retryMaxAttempts',4),retry_max_frames:retryIntValue('retryMaxFrames',4096),retry_stall_timeout:retryDurationValue('retryStallTimeout','60s'),retry_hold_timeout:retryDurationValue('retryHoldTimeout','90s'),retry_chain_deadline:retryDurationValue('retryChainDeadline','240s'),retry_max_bytes:retryTextValue('retryMaxBytes','8MB'),retry_chain:collectRetryChainRows()}}
 function node(tag,className,text){const item=document.createElement(tag);if(className)item.className=className;if(text!==undefined)item.textContent=text;return item}
 function addKV(parent,key,value){parent.append(node('span','',key),node('span','',value||'暂无'))}
 function addBadge(text,className){return node('span','badge '+(className||''),text)}
@@ -1671,8 +1808,15 @@ function renderAccounts(accounts){const queue=document.querySelector('section.qu
 async function readJSON(resp){const text=await resp.text();if(!text)return{};try{return JSON.parse(text)}catch{return{error:text}}}
 function authHeaders(){const input=document.getElementById('managementKey');const key=(input&&input.value||'').trim();if(!key)throw new Error(t('error.managementKeyRequired'));const name='Author'+'ization';const scheme='Bea'+'rer ';const headers={};headers[name]=key.toLowerCase().startsWith(scheme.toLowerCase())?key:scheme+key;return headers}
 async function requestManagement(path,options){const opts=options||{};const headers=authHeaders();let url=MANAGEMENT_BASE+path;if(opts.query){const params=new URLSearchParams(opts.query);url+='?'+params.toString()}const init={method:opts.method||'GET',headers};if(Object.prototype.hasOwnProperty.call(opts,'body')){headers['Content-Type']=opts.contentType||'application/json';init.body=typeof opts.body==='string'?opts.body:JSON.stringify(opts.body)}const resp=await fetch(url,init);const data=await readJSON(resp);const message=data.error||data.message||t('error.requestFailed',{status:resp.status});if(!resp.ok){if(resp.status===401||/invalid management key/i.test(message))showManagementKeyInput();throw new Error(message)}return data}
-function fillSettings(){const s=STATUS.settings||{};document.getElementById('handleEnabled').checked=s.handle_enabled!==false;document.getElementById('usageFeedback').checked=s.enable_usage_feedback!==false;document.getElementById('enableResetProbe').checked=s.enable_reset_probe===true;document.getElementById('probeOnProvisionalRoster').checked=s.probe_on_provisional_roster===true;document.getElementById('monthlyMode').value=s.monthly_mode||'expiry_order';document.getElementById('refreshInterval').value=s.quota_refresh_interval||'30m0s';document.getElementById('staleAfter').value=s.stale_after||'5h0m0s';document.getElementById('refreshActiveWindow').value=s.refresh_active_window||'1h0m0s';document.getElementById('refreshAfterResetDelay').value=s.refresh_after_reset_delay||'1m0s';document.getElementById('refreshRetryDelays').value=s.refresh_retry_delays||'1m0s,5m0s,15m0s';document.getElementById('refreshOnStartup').checked=s.refresh_on_startup===true;document.getElementById('maxConcurrency').value=s.max_refresh_concurrency||1;document.getElementById('circuitFailureThreshold').value=s.circuit_failure_threshold||5;document.getElementById('circuitOpenDuration').value=s.circuit_open_duration||'30m0s';document.getElementById('circuitHalfOpenSuccessThreshold').value=s.circuit_half_open_success_threshold||2;document.getElementById('maxLogEntries').value=s.max_log_entries||200;document.getElementById('logRetention').value=s.log_retention||'24h0m0s';fillRetrySettings()}
-async function saveSettings(){try{if(!statusLoaded){await loadStatus();return}await requestManagement('/settings',{method:'PUT',body:collectSettingsPayload()});settingsDirty=false;showNotice(t('notice.settingsSaved'),false,'notice.settingsSaved');await refreshStatus({management:true,fillSettings:true})}catch(error){showNotice(error.message||String(error),true)}}
+function telegramTokenLooksValid(token){return token.length<=256&&/^[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$/.test(token)}
+function telegramChatIDLooksValid(chatID){return chatID.length>0&&chatID.length<=256&&!/[\s]/.test(chatID)}
+function telegramCredentialsReady(){const s=STATUS.settings||{};const token=document.getElementById('telegramBotToken').value.trim();const remove=document.getElementById('telegramRemoveToken').checked===true;const tokenReady=telegramTokenLooksValid(token)||(s.telegram_bot_token_configured===true&&!remove);return tokenReady&&telegramChatIDLooksValid(document.getElementById('telegramChatID').value.trim())}
+function autoEnableTelegramNotifications(){if(telegramCredentialsReady())document.getElementById('telegramEnabled').checked=true}
+function handleTelegramRemoveChange(){const remove=document.getElementById('telegramRemoveToken');if(!remove.checked)autoEnableTelegramNotifications()}
+function updateTelegramTokenStatus(){const s=STATUS.settings||{};const status=document.getElementById('telegramTokenStatus');const remove=document.getElementById('telegramRemoveToken');if(!status||!remove)return;const configured=s.telegram_bot_token_configured===true;status.textContent=t(configured?'telegram.tokenConfigured':'telegram.tokenMissing');status.classList.toggle('configured',configured);remove.disabled=!configured;remove.checked=false}
+function fillSettings(){const s=STATUS.settings||{};if(s.telegram_language==='zh-CN'||s.telegram_language==='en')changeLocale(s.telegram_language);document.getElementById('handleEnabled').checked=s.handle_enabled!==false;document.getElementById('usageFeedback').checked=s.enable_usage_feedback!==false;document.getElementById('enableResetProbe').checked=s.enable_reset_probe===true;document.getElementById('probeOnProvisionalRoster').checked=s.probe_on_provisional_roster===true;document.getElementById('monthlyMode').value=s.monthly_mode||'expiry_order';document.getElementById('refreshInterval').value=s.quota_refresh_interval||'30m0s';document.getElementById('staleAfter').value=s.stale_after||'5h0m0s';document.getElementById('refreshActiveWindow').value=s.refresh_active_window||'1h0m0s';document.getElementById('refreshAfterResetDelay').value=s.refresh_after_reset_delay||'1m0s';document.getElementById('refreshRetryDelays').value=s.refresh_retry_delays||'1m0s,5m0s,15m0s';document.getElementById('refreshOnStartup').checked=s.refresh_on_startup===true;document.getElementById('maxConcurrency').value=s.max_refresh_concurrency||1;document.getElementById('circuitFailureThreshold').value=s.circuit_failure_threshold||5;document.getElementById('circuitOpenDuration').value=s.circuit_open_duration||'30m0s';document.getElementById('circuitHalfOpenSuccessThreshold').value=s.circuit_half_open_success_threshold||2;document.getElementById('maxLogEntries').value=s.max_log_entries||200;document.getElementById('logRetention').value=s.log_retention||'24h0m0s';document.getElementById('telegramEnabled').checked=s.telegram_notifications_enabled===true;document.getElementById('telegramChatID').value=s.telegram_chat_id||'';document.getElementById('telegramBotToken').value='';updateTelegramTokenStatus();autoEnableTelegramNotifications();fillRetrySettings()}
+async function saveSettings(){try{if(!statusLoaded){await loadStatus();return false}await requestManagement('/settings',{method:'PUT',body:collectSettingsPayload()});document.getElementById('telegramBotToken').value='';document.getElementById('telegramRemoveToken').checked=false;settingsDirty=false;showNotice(t('notice.settingsSaved'),false,'notice.settingsSaved');await refreshStatus({management:true,fillSettings:true});return true}catch(error){showNotice(error.message||String(error),true);return false}}
+async function sendTelegramTest(){const button=document.getElementById('telegramTest');const status=document.getElementById('telegramTestStatus');const removing=document.getElementById('telegramRemoveToken').checked===true;const enabled=document.getElementById('telegramEnabled').checked===true;if(button)button.disabled=true;if(status)status.textContent=t('telegram.testSending');try{if(!await saveSettings()){if(status)status.textContent='';return}if(removing||!enabled){if(status)status.textContent=t('telegram.disabled');showNotice(t('telegram.disabled'),false);return}await requestManagement('/telegram/test',{method:'POST'});if(status)status.textContent=t('telegram.testSent');showNotice(t('telegram.testSent'),false)}catch(error){if(status)status.textContent=error.message||String(error);showNotice(error.message||String(error),true)}finally{if(button)button.disabled=false}}
 async function refreshQuota(){try{await requestManagement('/refresh',{method:'POST'});showNotice(t('notice.refreshRequested'),false,'notice.refreshRequested');await refreshStatus({management:true});pollStatus(3,1200)}catch(error){showNotice(error.message||String(error),true)}}
 function splitTags(text){return text.split(',').map((item)=>item.trim()).filter(Boolean)}
 function openEdit(authID){if(!hasManagementKey()){showNotice(t('error.managementKeyRequired'),true,'error.managementKeyRequired');return}const account=accountsByID.get(authID)||{};editingAuthID=authID;document.getElementById('editAuthID').textContent=authID;document.getElementById('editAlias').value=account.alias||'';document.getElementById('editSchedulerPriority').value=account.scheduler_priority||0;document.getElementById('editNotes').value=account.notes||'';document.getElementById('editGroupID').value=account.group_id||'';document.getElementById('editGroupName').value=account.group||'';document.getElementById('editGroupNotes').value=account.group_notes||'';document.getElementById('editTags').value=(account.tags||[]).join(', ');editDialog.showModal()}
@@ -1700,6 +1844,10 @@ document.getElementById('managementKey').addEventListener('keydown',(event)=>{if
 document.getElementById('rememberManagementKey').addEventListener('change',syncRememberedManagementKey);
 document.getElementById('loadData').addEventListener('click',loadStatus);
 document.getElementById('saveSettings').addEventListener('click',saveSettings);
+document.getElementById('telegramTest').addEventListener('click',sendTelegramTest);
+document.getElementById('telegramBotToken').addEventListener('input',autoEnableTelegramNotifications);
+document.getElementById('telegramChatID').addEventListener('input',autoEnableTelegramNotifications);
+document.getElementById('telegramRemoveToken').addEventListener('change',handleTelegramRemoveChange);
 document.getElementById('refreshQuota').addEventListener('click',refreshQuota);
 document.getElementById('refreshLogs').addEventListener('click',refreshLogs);
 document.getElementById('exportLogs').addEventListener('click',exportLogs);

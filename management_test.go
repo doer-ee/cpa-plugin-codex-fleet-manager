@@ -425,10 +425,10 @@ func TestStatusPayloadExplainsEmptyQueueBeforeFirstRequest(t *testing.T) {
 	if payload.RefreshActive {
 		t.Fatalf("RefreshActive = true, want false before first request")
 	}
-	if payload.EmptyState.Reason != "sleeping_no_activity" {
-		t.Fatalf("EmptyState reason = %q, want sleeping_no_activity; payload=%#v", payload.EmptyState.Reason, payload.EmptyState)
+	if payload.EmptyState.Reason != "startup_refresh" {
+		t.Fatalf("EmptyState reason = %q, want startup_refresh; payload=%#v", payload.EmptyState.Reason, payload.EmptyState)
 	}
-	for _, want := range []string{"1h0m0s", "发送第一次 Codex 请求"} {
+	for _, want := range []string{"启动刷新已启用", "无需手动点击刷新"} {
 		if !strings.Contains(payload.EmptyState.Message, want) {
 			t.Fatalf("EmptyState message missing %q: %q", want, payload.EmptyState.Message)
 		}
@@ -906,6 +906,36 @@ func TestStatusPageUsesDedicatedSettingsPageAndNoHardReload(t *testing.T) {
 	}
 }
 
+func TestStatusPageUsesOnePersistedPluginLanguageSetting(t *testing.T) {
+	store := NewPluginState(DefaultConfig())
+	page := renderStatusPageForTest(t, store)
+	settingsStart := strings.Index(page, `id="settingsPanel"`)
+	languageStart := strings.Index(page, `id="localeSelect"`)
+	telegramStart := strings.Index(page, `data-i18n="telegram.title"`)
+	if settingsStart < 0 || languageStart < 0 || telegramStart < 0 {
+		t.Fatalf("page missing settings, language, or Telegram section")
+	}
+	if languageStart < settingsStart || languageStart > telegramStart {
+		t.Fatalf("language selector must be at the top of the Settings view: settings=%d language=%d telegram=%d", settingsStart, languageStart, telegramStart)
+	}
+	for _, want := range []string{
+		`data-i18n="settings.languageHelp"`,
+		`telegram_language:currentLocale`,
+		`if(s.telegram_language==='zh-CN'||s.telegram_language==='en')changeLocale(s.telegram_language)`,
+		`Used for both the plugin interface and Telegram notifications.`,
+		`同时用于插件界面和 Telegram 通知。`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("page missing unified language marker %q", want)
+		}
+	}
+	for _, unwanted := range []string{`id="telegramLanguage"`, `data-i18n="telegram.language"`, `Notification language`, `通知语言`} {
+		if strings.Contains(page, unwanted) {
+			t.Fatalf("page still contains separate notification language control %q", unwanted)
+		}
+	}
+}
+
 func TestStatusPageShowsResetProbeWarningOnlyAfterProtectedLoadWhenDisabled(t *testing.T) {
 	store := NewPluginState(DefaultConfig())
 	page := renderStatusPageForTest(t, store)
@@ -1193,8 +1223,8 @@ func TestSettingsPayloadIncludesAdaptiveRefresh(t *testing.T) {
 	if payload.RefreshRetryDelays != "1m0s,5m0s,15m0s" {
 		t.Fatalf("RefreshRetryDelays = %q, want 1m0s,5m0s,15m0s", payload.RefreshRetryDelays)
 	}
-	if payload.RefreshOnStartup {
-		t.Fatal("RefreshOnStartup = true, want false")
+	if !payload.RefreshOnStartup {
+		t.Fatal("RefreshOnStartup = false, want true")
 	}
 }
 

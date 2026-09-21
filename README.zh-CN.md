@@ -4,10 +4,11 @@
 
 ## TL;DR
 
-Codex Fleet Manager 是一个运行在 CLIProxyAPI中的 Codex 账号调配与
+Codex Fleet Manager 是一个运行在 CLIProxyAPI 中的 Codex 账号调配与
 模型故障转移插件。它根据账号额度以及重置时间自动选择合适的 Codex 账号，
 以保持各账号的使用量基本均衡，并在模型容量不足、服务过载或上游请求失败时，
-自动按照预先配置的备用模型链进行重试。
+自动按照预先配置的备用模型链进行重试。当一个或多个账号进入 HTTP 401
+认证失败状态并需要重新登录时，它还可以发送 Telegram 通知。
 
 ------
 `codex-fleet-manager` 是 CLIProxyAPI（CPA）的动态库插件，为 Codex 账号提供
@@ -34,6 +35,27 @@ Codex Fleet Manager 基于 Jeffery Zhang 的 Codex Quota Scheduler 改进，
 - 新增双语重试调度日志，并将调度设置放到独立页面。
 - 新增 CPA `v7.3.4+` 版本检查，以及带用户确认的内嵌对比表，用于修复四项
   流式/重试前置设置；差异会以红色标记，修复通过 CPA 热加载完成。
+
+## v0.4.0 主要更新
+
+- 新增可选的 Telegram 告警：一个或多个 Codex 账号因 HTTP 401 或 OAuth
+  `invalid_grant` 需要重新登录时发送通知。
+- 新增基于状态切换的去重、15 秒多账号聚合、有限次数的后台发送重试，以及
+  账号成功重新登录刷新后的自动重新启用。
+- 新增中英文通知消息与日志，以及设置页测试通知按钮。
+- Bot Token 在界面中只写不可读，并单独保存在权限为 `0600` 的密钥文件中；
+  状态响应、HTML、日志和配置导出均不会包含它。
+
+## Telegram 认证告警
+
+打开 **设置 → Telegram 通知**，填写 BotFather 提供的完整 Bot Token 和目标
+Chat ID，然后点击 **测试并保存 Telegram 设置**。通知会使用设置页顶部选择的插件语言。只有数字 Bot ID
+无法发送消息，必须使用完整 Bot Token。
+
+CFM 会同时观察后台额度/Token 刷新和 CPA 的普通请求反馈。只有账号从正常状态
+切换为认证失败时才发送告警；15 秒内检测到的多个账号会合并，重复 401 不会
+反复通知。账号重新登录并成功刷新后，该账号会重新具备告警资格。Telegram
+发送在独立后台流程中运行，不会阻塞账号调度或额度刷新。
 
 ## 模型重试链
 
@@ -97,6 +119,10 @@ streaming:
 
 CPA 账号优先级与插件自己的账号优先级是两个独立设置。插件不会从 CPA 读取
 插件优先级，也不会把插件优先级写回 CPA。
+
+插件默认启用启动时额度刷新，并会等 CPA 发布权威账号列表后再执行，因此安装
+或更新插件后不再需要手动点击 **刷新额度**。如果请求恰好落在 CPA 短暂的
+provider 加载窗口内，CFM 会自动重试临时的 `unknown provider for model` 错误。
 
 ### 2. 先判断账号是否真的可用
 
@@ -255,7 +281,7 @@ stale_after: 5h
 refresh_active_window: 1h
 refresh_after_reset_delay: 1m
 refresh_retry_delays: 1m,5m,15m
-refresh_on_startup: false
+refresh_on_startup: true
 monthly_mode: expiry_order
 fallback: fill-first
 enable_usage_feedback: true
@@ -325,6 +351,11 @@ GET https://chatgpt.com/backend-api/wham/rate-limit-reset-credits
 本地插件状态可能包含调度设置、额度快照、操作状态、日志、别名、备注、标签和
 分组名称。不要在备注、别名、标签或分组标注中填写秘密。管理界面避免渲染
 access token、Authorization header、Cookie 和其他凭据字段。
+
+当 CPA 提供标准 `plugins` 目录时，CFM 会把状态保存到
+`plugins/data/codex-fleet-manager/`，因此升级并重建 CPA 容器后仍会保留设置和重试链。
+旧版用户配置目录中的状态会自动复制到新位置，且不会删除旧文件或覆盖已有文件。
+如需指定其他持久化目录，可设置 `CODEX_FLEET_MANAGER_STATE_DIR`。
 
 Resource 路由只提供界面资源。账号数据和受保护操作通过 Management 路由处理，
 并要求 CPA 管理密钥。

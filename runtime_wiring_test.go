@@ -1247,6 +1247,38 @@ func TestProductionRosterPublicationEnablesManualRefresh(t *testing.T) {
 	}
 }
 
+func TestStartupRefreshWaitsForAuthoritativeRosterThenRunsAutomatically(t *testing.T) {
+	now := time.Date(2026, 9, 21, 9, 0, 0, 0, time.UTC)
+	host := &countingProductionHost{
+		httpResp: pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(`{"rate_limit":{"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`)},
+		auth: map[string]pluginapi.HostAuthGetResponse{
+			"a": {AuthIndex: "a", Name: "a.json", JSON: json.RawMessage(`{"access_token":"a","refresh_token":"ra","account_id":"acct-a"}`)},
+		},
+	}
+	state := NewPluginState(DefaultConfig())
+	adapter := &rosterCredentialHost{host: host, roster: HostRosterSnapshot{Capability: CapabilityB}}
+	r, err := NewProductionQuotaRefresher(host, state, adapter, HostRosterSnapshot{Capability: CapabilityB}, filepath.Join(t.TempDir(), "state.json"), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.bindings = r.bindings
+	r.Start()
+	r.RequestStartupRefresh()
+	if host.http != 0 {
+		t.Fatalf("startup refresh made %d HTTP calls before roster confirmation", host.http)
+	}
+	roster := HostRosterSnapshot{Capability: CapabilityA, Confirmed: true, Health: RosterHealthy, BackgroundAllowed: true, Entries: []RosterEntry{
+		{ID: "a", AuthIndex: "a", Provider: "codex", Priority: intPtr(9)},
+	}}
+	if err := r.PublishAuthoritativeRoster(context.Background(), roster); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForCondition(t, time.Second, func() bool { return len(state.Snapshot(now).Accounts) == 1 }) {
+		t.Fatalf("startup refresh did not populate the account after roster confirmation: accounts=%d", len(state.Snapshot(now).Accounts))
+	}
+	r.Stop()
+}
+
 func TestProductionRosterReplacementReplacesAdmissionAndFencesStaleRefresh(t *testing.T) {
 	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
 	host := &countingProductionHost{auth: map[string]pluginapi.HostAuthGetResponse{

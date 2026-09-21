@@ -103,8 +103,8 @@ func TestDefaultConfigAdaptiveRefreshDefaults(t *testing.T) {
 	if got := cfg.RefreshRetryDelays; !reflect.DeepEqual(got, []time.Duration{time.Minute, 5 * time.Minute, 15 * time.Minute}) {
 		t.Fatalf("RefreshRetryDelays = %#v, want 1m,5m,15m", got)
 	}
-	if cfg.RefreshOnStartup {
-		t.Fatal("RefreshOnStartup = true, want false")
+	if !cfg.RefreshOnStartup {
+		t.Fatal("RefreshOnStartup = false, want true")
 	}
 	if cfg.CircuitFailureThreshold != 5 {
 		t.Fatalf("CircuitFailureThreshold = %d, want 5", cfg.CircuitFailureThreshold)
