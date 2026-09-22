@@ -219,6 +219,14 @@ func handleUsageHandle(raw []byte) ([]byte, error) {
 		go func() { _, _ = rosterController.WakeForActivity(context.Background()) }()
 	}
 	authFailureFeedback := HandleUsageFeedback(globalState, record, now)
+	if authFailureFeedback {
+		refresherMu.Lock()
+		refresher := globalRefresher
+		refresherMu.Unlock()
+		if refresher != nil {
+			refresher.ScheduleAuthRecoveryPoll()
+		}
+	}
 	evidenceKind := EvidenceUnknown
 	quotaLimitFeedback := false
 	if record.Provider == "codex" && !record.Failed {

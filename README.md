@@ -10,7 +10,8 @@ on quota and reset time to keep account usage balanced, and retries requests
 against a preconfigured fallback model chain when a model is at capacity,
 overloaded, or an upstream request fails. It can also send a Telegram
 notification when one or more accounts enter an HTTP 401 authentication-failure
-state and require re-login.
+state and require re-login, then automatically detect updated credentials and
+restore the account after a successful refresh.
 
 
 ---------
@@ -56,6 +57,19 @@ is not an official successor or endorsed release of the original project.
   file. They are excluded from status responses, HTML, logs, and configuration
   exports.
 
+## v0.4.1 Highlights
+
+- Added automatic recovery checks for accounts blocked by HTTP 401
+  authentication failures.
+- While at least one account is in authentication failure, CFM polls CPA's
+  local `host.auth.list` metadata every five minutes, including while normal
+  quota refresh is sleeping. No extra polling runs when no account is blocked.
+- When a failed account's `ModTime` or `UpdatedAt` becomes newer than its
+  failure time, CFM immediately runs the existing single-account refresh flow.
+  The authentication-failure state is cleared only after that refresh succeeds.
+- Added bilingual authentication-recovery logs and regression coverage for
+  credential-change detection and background lifecycle safety.
+
 ## Telegram Authentication Alerts
 
 Open **Settings → Telegram Notifications**, enter the Bot Token issued by
@@ -70,6 +84,12 @@ combines failures detected within 15 seconds, and suppresses repeated alerts
 until a successful account refresh confirms that the account has recovered.
 Telegram delivery runs independently and cannot block account scheduling or
 quota refresh.
+
+After re-login updates a failed account's CPA auth file, CFM detects the newer
+local credential metadata within five minutes and refreshes that account even
+if routine quota refresh is sleeping. This check reads CPA-local auth metadata
+only and is disabled automatically when no account is in authentication
+failure.
 
 ## Model Retry Chain
 

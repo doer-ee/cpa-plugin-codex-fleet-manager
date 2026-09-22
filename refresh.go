@@ -24,6 +24,7 @@ const codexClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
 const rosterLifecycleRequestHeader = "X-CPA-Roster-Lifecycle"
 const rosterLifecycleDegraded = "degraded"
 const rosterLifecycleProvisional = "provisional"
+const authRecoveryPollInterval = 5 * time.Minute
 
 const maxErrorBodySummaryLen = 220
 
@@ -231,6 +232,7 @@ type QuotaRefresher struct {
 	pendingDue             func() error
 	pendingDueVersion      uint64
 	startupRefreshPending  bool
+	authRecoveryPollAt     time.Time
 	wg                     sync.WaitGroup
 	coordinator            *Coordinator
 	legacyTxn              *LegacyRefreshTxn
@@ -1241,6 +1243,7 @@ func (r *QuotaRefresher) Start() {
 			select {
 			case <-timerC:
 				r.refreshController.OnDeadline(r.now())
+				r.pollAuthRecoveryIfDue()
 				r.RefreshDueSoon()
 				if r.probeController != nil {
 					r.launchProbeFromTimer(false)
@@ -1263,6 +1266,112 @@ func (r *QuotaRefresher) Start() {
 			}
 		}
 	}()
+}
+
+// ScheduleAuthRecoveryPoll keeps the deadline-driven refresh loop awake while
+// an account is blocked by an authentication failure. The eventual poll reads
+// CPA's local auth metadata only; it does not contact the upstream provider.
+func (r *QuotaRefresher) ScheduleAuthRecoveryPoll() {
+	if r == nil || r.state == nil {
+		return
+	}
+	now := r.now()
+	r.mu.Lock()
+	if r.authRecoveryPollAt.IsZero() {
+		r.authRecoveryPollAt = now.Add(authRecoveryPollInterval)
+	}
+	r.mu.Unlock()
+	if r.refreshController == nil {
+		return
+	}
+	r.Start()
+	r.wakeRefreshLoop()
+}
+
+func (r *QuotaRefresher) authRecoveryDeadline(now time.Time) time.Time {
+	hasAuthFailure := false
+	for _, account := range r.state.Snapshot(now).Accounts {
+		if account.Refresh.AuthFailure {
+			hasAuthFailure = true
+			break
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !hasAuthFailure {
+		r.authRecoveryPollAt = time.Time{}
+		return time.Time{}
+	}
+	if r.authRecoveryPollAt.IsZero() {
+		r.authRecoveryPollAt = now.Add(authRecoveryPollInterval)
+	}
+	return r.authRecoveryPollAt
+}
+
+func authRecoveryCandidates(snapshot StateSnapshot, auths []pluginapi.HostAuthFileEntry) []pluginapi.HostAuthFileEntry {
+	failuresByID := make(map[string]AccountState)
+	failuresByIndex := make(map[string]AccountState)
+	for _, account := range snapshot.Accounts {
+		if !account.Refresh.AuthFailure {
+			continue
+		}
+		if account.AuthID != "" {
+			failuresByID[account.AuthID] = account
+		}
+		if account.AuthIndex != "" {
+			failuresByIndex[account.AuthIndex] = account
+		}
+	}
+	candidates := make([]pluginapi.HostAuthFileEntry, 0)
+	for _, auth := range auths {
+		account, ok := failuresByID[auth.ID]
+		if !ok && auth.AuthIndex != "" {
+			account, ok = failuresByIndex[auth.AuthIndex]
+		}
+		if !ok {
+			continue
+		}
+		changedAt := auth.ModTime
+		if auth.UpdatedAt.After(changedAt) {
+			changedAt = auth.UpdatedAt
+		}
+		if !changedAt.IsZero() && changedAt.After(account.Refresh.LastFailureAt) {
+			candidates = append(candidates, auth)
+		}
+	}
+	return candidates
+}
+
+func (r *QuotaRefresher) pollAuthRecoveryIfDue() {
+	if r == nil || r.state == nil || r.host == nil {
+		return
+	}
+	now := r.now()
+	deadline := r.authRecoveryDeadline(now)
+	if deadline.IsZero() || deadline.After(now) {
+		return
+	}
+	r.mu.Lock()
+	r.authRecoveryPollAt = now.Add(authRecoveryPollInterval)
+	r.mu.Unlock()
+	if !r.normalBackgroundAllowed() {
+		return
+	}
+	auths, err := r.host.ListAuths()
+	if err != nil {
+		r.state.RecordLog("warn", "auth.recovery_poll_failed", "Authentication recovery check failed", map[string]any{"error": redactSecrets(err.Error())}, now)
+		return
+	}
+	candidates := authRecoveryCandidates(r.state.Snapshot(now), auths)
+	if len(candidates) == 0 {
+		return
+	}
+	_, version := r.state.CPAAdmissionVersioned()
+	r.state.RecordLog("info", "auth.recovery_detected", "Updated credentials detected; refreshing account", map[string]any{"account_count": len(candidates)}, now)
+	r.refreshDueSoon(version, func() error {
+		r.refreshAuths(candidates, version, SourceSchedulerStaleRecovery)
+		return nil
+	})
 }
 
 func hasPendingProbeWindows(windows map[AuthInstanceID]map[ProbeWindowKind]ProbeWindow) bool {
@@ -1433,6 +1542,9 @@ func (r *QuotaRefresher) finishProbeLaunch(runErr error, recoveryAttempted bool,
 func (r *QuotaRefresher) nextRefreshLoopDelay() (time.Duration, bool) {
 	now := r.now()
 	deadline := r.refreshController.NextDeadline(now)
+	if authRecovery := r.authRecoveryDeadline(now); !authRecovery.IsZero() && (deadline.IsZero() || authRecovery.Before(deadline)) {
+		deadline = authRecovery
+	}
 	if r.probeController != nil && r.resetProbeEnabled() {
 		r.probeRunStateMu.Lock()
 		launchActive := r.probeLaunchActive
@@ -2163,6 +2275,9 @@ func (r *QuotaRefresher) upsertRefreshFailure(account AccountState, version uint
 		r.recordAdmissionLog(merged.AuthID, version, "warn", "quota.refresh_failed", "账号额度刷新失败", map[string]any{"auth_id": merged.AuthID, "error": message})
 		if becameAuthFailure && notificationReason != "" {
 			notifyAuthenticationFailure(merged, notificationReason, now)
+		}
+		if kind == RefreshFailureAuth {
+			r.ScheduleAuthRecoveryPoll()
 		}
 	}
 }

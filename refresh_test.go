@@ -44,6 +44,49 @@ type fakeHostClient struct {
 	urls         []string
 }
 
+func TestAuthRecoveryCandidatesRequireCredentialMetadataAfter401(t *testing.T) {
+	failureAt := time.Date(2026, 9, 22, 13, 50, 0, 0, time.FixedZone("CDT", -5*60*60))
+	snapshot := StateSnapshot{Accounts: []AccountState{{AuthID: "auth-1", AuthIndex: "index-1", Refresh: AccountRefreshState{AuthFailure: true, LastFailureAt: failureAt}}}}
+	auths := []pluginapi.HostAuthFileEntry{
+		{ID: "auth-1", AuthIndex: "index-1", ModTime: failureAt.Add(-time.Second), UpdatedAt: failureAt.Add(-time.Second)},
+		{ID: "auth-1", AuthIndex: "index-1", ModTime: failureAt.Add(time.Second), UpdatedAt: failureAt.Add(time.Second)},
+		{ID: "auth-2", AuthIndex: "index-2", ModTime: failureAt.Add(time.Hour), UpdatedAt: failureAt.Add(time.Hour)},
+	}
+	candidates := authRecoveryCandidates(snapshot, auths)
+	if len(candidates) != 1 || candidates[0].ID != "auth-1" {
+		t.Fatalf("authRecoveryCandidates() = %#v, want only updated auth-1", candidates)
+	}
+}
+
+func TestAuthRecoveryPollAdvancesDeadlineWhenBackgroundWorkIsDisallowed(t *testing.T) {
+	now := time.Date(2026, 9, 22, 14, 0, 0, 0, time.UTC)
+	state := NewPluginState(DefaultConfig())
+	if _, ok := state.RecordRefreshFailure("auth-1", "index-1", RefreshFailureAuth, "unauthorized", now.Add(-time.Minute)); !ok {
+		t.Fatal("failed to record authentication failure")
+	}
+	host := &fakeHostClient{}
+	refresher := NewQuotaRefresher(host, state, func() time.Time { return now })
+	refresher.ObserveRosterLifecycle(ActiveRoster{Capability: CapabilityA, Confirmed: true, Health: RosterFailClosed})
+	refresher.mu.Lock()
+	refresher.authRecoveryPollAt = now
+	refresher.mu.Unlock()
+
+	refresher.pollAuthRecoveryIfDue()
+
+	refresher.mu.Lock()
+	gotDeadline := refresher.authRecoveryPollAt
+	refresher.mu.Unlock()
+	if want := now.Add(authRecoveryPollInterval); !gotDeadline.Equal(want) {
+		t.Fatalf("auth recovery deadline = %v, want %v", gotDeadline, want)
+	}
+	host.mu.Lock()
+	listCalls := host.listCalls
+	host.mu.Unlock()
+	if listCalls != 0 {
+		t.Fatalf("ListAuths calls = %d, want 0 while background work is disallowed", listCalls)
+	}
+}
+
 func (f *fakeHostClient) ListAuths() ([]pluginapi.HostAuthFileEntry, error) {
 	f.mu.Lock()
 	f.listCalls++
