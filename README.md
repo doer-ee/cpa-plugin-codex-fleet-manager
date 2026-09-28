@@ -25,24 +25,27 @@ is independently improved and maintained. It is distributed under the MIT
 License and preserves the original project's copyright and license notices. It
 is not an official successor or endorsed release of the original project.
 
-## v0.1.0 Highlights
+## v0.4.3 Highlights
 
-- Independent plugin identity: dedicated CPA API routes, browser storage,
-  state directory, dynamic-library names, and release archives.
-- Optimized Fill First scheduling based on real account availability and quota
-  pressure rather than a static account order.
-- Optional reset-window activation and deadline-driven quota refresh.
-- Bilingual Management UI, account annotations, priorities, and JSON backup.
+- Added a bilingual red update notice directly below the account-queue
+  explanation.
+- Shows the installed and latest CFM versions and provides a one-click manual
+  update through CPA's official Plugin Store API.
+- Keeps updates opt-in: the plugin never installs a release silently in the
+  background.
 
-## v0.3.14 Highlights
+## v0.4.1 Highlights
 
-- Added the Model Retry Chain page with Live, Shadow, and Always Retry modes.
-- Added ordered, independently numbered fallbacks and automatic routable-model
-  catalog loading with duplicate model IDs removed.
-- Added bilingual retry scheduler logs and a separate Settings page layout.
-- Added CPA `v7.3.4+` version checking and an inline, user-confirmed comparison
-  table for repairing the four stream/retry prerequisites; differences are
-  highlighted in red and the repair uses CPA hot reload.
+- Added automatic recovery checks for accounts blocked by HTTP 401
+  authentication failures.
+- While at least one account is in authentication failure, CFM polls CPA's
+  local `host.auth.list` metadata every five minutes, including while normal
+  quota refresh is sleeping. No extra polling runs when no account is blocked.
+- When a failed account's `ModTime` or `UpdatedAt` becomes newer than its
+  failure time, CFM immediately runs the existing single-account refresh flow.
+  The authentication-failure state is cleared only after that refresh succeeds.
+- Added bilingual authentication-recovery logs and regression coverage for
+  credential-change detection and background lifecycle safety.
 
 ## v0.4.0 Highlights
 
@@ -57,18 +60,24 @@ is not an official successor or endorsed release of the original project.
   file. They are excluded from status responses, HTML, logs, and configuration
   exports.
 
-## v0.4.1 Highlights
+## v0.3.14 Highlights
 
-- Added automatic recovery checks for accounts blocked by HTTP 401
-  authentication failures.
-- While at least one account is in authentication failure, CFM polls CPA's
-  local `host.auth.list` metadata every five minutes, including while normal
-  quota refresh is sleeping. No extra polling runs when no account is blocked.
-- When a failed account's `ModTime` or `UpdatedAt` becomes newer than its
-  failure time, CFM immediately runs the existing single-account refresh flow.
-  The authentication-failure state is cleared only after that refresh succeeds.
-- Added bilingual authentication-recovery logs and regression coverage for
-  credential-change detection and background lifecycle safety.
+- Added the Model Retry Chain page with Live, Shadow, and Always Retry modes.
+- Added ordered, independently numbered fallbacks and automatic routable-model
+  catalog loading with duplicate model IDs removed.
+- Added bilingual retry scheduler logs and a separate Settings page layout.
+- Added CPA `v7.3.4+` version checking and an inline, user-confirmed comparison
+  table for repairing the four stream/retry prerequisites; differences are
+  highlighted in red and the repair uses CPA hot reload.
+
+## v0.1.0 Highlights
+
+- Independent plugin identity: dedicated CPA API routes, browser storage,
+  state directory, dynamic-library names, and release archives.
+- Optimized Fill First scheduling based on real account availability and quota
+  pressure rather than a static account order.
+- Optional reset-window activation and deadline-driven quota refresh.
+- Bilingual Management UI, account annotations, priorities, and JSON backup.
 
 ## Telegram Authentication Alerts
 
