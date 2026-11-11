@@ -25,7 +25,7 @@ is independently improved and maintained. It is distributed under the MIT
 License and preserves the original project's copyright and license notices. It
 is not an official successor or endorsed release of the original project.
 
-## Unreleased Highlights
+## v0.4.4 Highlights
 
 - Added per-account Protection mode with separate, configurable five-hour and
   weekly remaining-quota thresholds (both default to 10%).
