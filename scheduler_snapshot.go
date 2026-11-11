@@ -123,6 +123,7 @@ func accountViewFromState(a AccountState, cfg Config, now time.Time, trials *Tri
 		cache = CacheAging
 	}
 	exhausted, reset := accountExhaustion(a, now)
+	protected, _ := accountProtected(a, cfg)
 	trial := TrialNone
 	if trials != nil {
 		trial = trials.State(a.Instance, now)
@@ -137,7 +138,7 @@ func accountViewFromState(a AccountState, cfg Config, now time.Time, trials *Tri
 	return AccountView{
 		ID: a.AuthID, AuthIndex: a.AuthIndex, Instance: a.Instance,
 		PluginPriority: a.Annotation.SchedulerPriority, Family: a.Family,
-		Cache: cache, LastKnownAvailable: a.LastError == "", Exhausted: exhausted,
+		Cache: cache, LastKnownAvailable: a.LastError == "", Exhausted: exhausted, Protected: protected,
 		ResetAt: reset, AuthBlocked: a.Refresh.AuthFailure, Circuit: circuitClass,
 		TemporaryUnavailable: a.TemporaryExhausted && a.TemporaryResetAt.After(now),
 		Trial:                trial, Expiry: accountSortTime(a), RemainingQuota: remainingQuota(a), QuotaPressure: quotaPressure(a, now),

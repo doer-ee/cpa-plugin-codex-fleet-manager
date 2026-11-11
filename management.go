@@ -102,6 +102,8 @@ type SettingsPayload struct {
 	TelegramNotificationsEnabled    bool        `json:"telegram_notifications_enabled"`
 	TelegramChatID                  string      `json:"telegram_chat_id"`
 	TelegramLanguage                string      `json:"telegram_language"`
+	ProtectionFiveHourPercent       *float64    `json:"protection_five_hour_percent,omitempty"`
+	ProtectionWeeklyPercent         *float64    `json:"protection_weekly_percent,omitempty"`
 	TelegramBotToken                string      `json:"telegram_bot_token,omitempty"`
 	TelegramBotTokenConfigured      bool        `json:"telegram_bot_token_configured"`
 	TelegramRemoveBotToken          bool        `json:"telegram_remove_bot_token,omitempty"`
@@ -133,6 +135,7 @@ type StatusAccount struct {
 	Tags                         []string           `json:"tags,omitempty"`
 	CPAPriority                  int                `json:"cpa_priority"`
 	SchedulerPriority            int                `json:"scheduler_priority"`
+	ProtectionEnabled            bool               `json:"protection_enabled"`
 	Family                       AccountFamily      `json:"family"`
 	QueueStatus                  QueueStatus        `json:"queue_status"`
 	Available                    bool               `json:"available"`
@@ -352,6 +355,8 @@ func SettingsFromConfig(cfg Config) SettingsPayload {
 		TelegramNotificationsEnabled:    cfg.TelegramNotificationsEnabled,
 		TelegramChatID:                  cfg.TelegramChatID,
 		TelegramLanguage:                cfg.TelegramLanguage,
+		ProtectionFiveHourPercent:       float64Ptr(protectionThreshold(cfg.ProtectionFiveHourPercent)),
+		ProtectionWeeklyPercent:         float64Ptr(protectionThreshold(cfg.ProtectionWeeklyPercent)),
 		TelegramBotTokenConfigured:      tokenConfigured,
 		RetryEnabled:                    cfg.RetryEnabled,
 		RetryShadow:                     cfg.RetryShadow,
@@ -493,6 +498,18 @@ func ConfigFromSettings(base Config, payload SettingsPayload) (Config, error) {
 	}
 	cfg.TelegramNotificationsEnabled = payload.TelegramNotificationsEnabled
 	cfg.TelegramChatID = strings.TrimSpace(payload.TelegramChatID)
+	if payload.ProtectionFiveHourPercent != nil {
+		if !validProtectionThreshold(*payload.ProtectionFiveHourPercent) {
+			return Config{}, jsonError("protection_five_hour_percent must be between 0 and 100")
+		}
+		cfg.ProtectionFiveHourPercent = float64Ptr(*payload.ProtectionFiveHourPercent)
+	}
+	if payload.ProtectionWeeklyPercent != nil {
+		if !validProtectionThreshold(*payload.ProtectionWeeklyPercent) {
+			return Config{}, jsonError("protection_weekly_percent must be between 0 and 100")
+		}
+		cfg.ProtectionWeeklyPercent = float64Ptr(*payload.ProtectionWeeklyPercent)
+	}
 	if payload.TelegramLanguage != "" {
 		if payload.TelegramLanguage != "en" && payload.TelegramLanguage != "zh-CN" {
 			return Config{}, jsonError("telegram_language must be en or zh-CN")
@@ -617,10 +634,20 @@ func saveSettingsPayload(store *PluginState, payload SettingsPayload) pluginapi.
 	}
 	store.ReplaceConfig(cfg)
 	currentConfig.Store(cfg)
+	wakeProtectionRefreshLoop()
 	if cfg.ProbeOnProvisionalRoster != previousRisk {
 		managementProvisionalRiskChanged(cfg.ProbeOnProvisionalRoster)
 	}
 	return jsonManagementResponse(http.StatusOK, SettingsFromConfig(cfg))
+}
+
+func wakeProtectionRefreshLoop() {
+	refresherMu.Lock()
+	refresher := globalRefresher
+	refresherMu.Unlock()
+	if refresher != nil {
+		refresher.wakeRefreshLoop()
+	}
 }
 
 func handleTelegramTest(store *PluginState, now time.Time) pluginapi.ManagementResponse {
@@ -768,6 +795,7 @@ func buildStatusPayload(snapshot StateSnapshot, ordered []ScheduledAccount, life
 			Tags:              cloneStringSlice(scheduled.Annotation.Tags),
 			CPAPriority:       scheduled.CPAPriority,
 			SchedulerPriority: scheduled.SchedulerPriority,
+			ProtectionEnabled: scheduled.Annotation.ProtectionEnabled,
 			Family:            scheduled.Family,
 			QueueStatus:       scheduled.QueueStatus,
 			Available:         scheduled.Available,
@@ -1228,6 +1256,7 @@ func handlePutAnnotations(store *PluginState, req pluginapi.ManagementRequest) p
 		return jsonManagementResponse(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 	store.SetAnnotations(state)
+	wakeProtectionRefreshLoop()
 	return jsonManagementResponse(http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -1271,12 +1300,16 @@ func applyAccountAnnotationPatch(store *PluginState, patch annotationPatch) plug
 	if patch.SchedulerPriority != nil {
 		annotation.SchedulerPriority = *patch.SchedulerPriority
 	}
+	if patch.ProtectionEnabled != nil {
+		annotation.ProtectionEnabled = *patch.ProtectionEnabled
+	}
 	state.Accounts[key] = annotation
 	state = NormalizeAnnotationState(state)
 	if err := persistAnnotationState(store, state); err != nil {
 		return jsonManagementResponse(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 	store.SetAnnotations(state)
+	wakeProtectionRefreshLoop()
 	return jsonManagementResponse(http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -1336,6 +1369,7 @@ type annotationPatch struct {
 	Tags              []string        `json:"tags"`
 	GroupID           *string         `json:"group_id"`
 	SchedulerPriority *int            `json:"scheduler_priority"`
+	ProtectionEnabled *bool           `json:"protection_enabled"`
 	Color             *string         `json:"color"`
 	Annotation        json.RawMessage `json:"annotation"`
 }
@@ -1456,6 +1490,7 @@ var statusTemplateV2 = template.Must(template.New("status-v2").Funcs(template.Fu
 .retryCPAConfirm{margin-top:12px;padding-top:12px;border-top:1px solid #eef0f3}.retryCPAConfirm strong{display:block;margin-bottom:8px;color:#111827}.retryCPAConfirm table{width:100%;border-collapse:collapse;font-size:12px;margin:8px 0 12px}.retryCPAConfirm th,.retryCPAConfirm td{border:1px solid #e5e7eb;padding:7px 8px;text-align:left}.retryCPAConfirm th{background:#f9fafb;color:#4b5563}.retryCPAConfirm .diff{color:#b91c1c;background:#fef2f2;font-weight:650}
 .settingsSection{border-top:1px solid #e5e7eb;margin-top:8px;padding-top:16px}.settingsSection h3{margin:0 0 5px;font-size:15px;color:#111827}.telegramGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 20px;margin-top:12px}.telegramGrid .wide{grid-column:1/-1}.secretStatus{font-size:12px;color:#6b7280;margin:-5px 0 12px}.secretStatus.configured{color:#166534}@media(max-width:860px){.telegramGrid{grid-template-columns:1fr}.telegramGrid .wide{grid-column:auto}}
 .plugin-update-notice{margin-top:12px;border:1px solid #fecaca;background:#fef2f2;color:#991b1b;border-radius:7px;padding:10px 11px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;font-size:12px;line-height:1.45}.plugin-update-notice strong{display:block;color:#991b1b;font-size:13px}.plugin-update-notice .danger{background:#dc2626;color:#fff}.plugin-update-status{flex-basis:100%;font-size:12px}
+.badge.protectionIndicator{background:#e0e7ff;color:#3730a3;font-weight:650}
 </style>
 </head>
 <body>
@@ -1471,6 +1506,9 @@ var statusTemplateV2 = template.Must(template.New("status-v2").Funcs(template.Fu
 <section class="settingsGrid" id="settingsPanel" hidden>
 <div class="setting-with-help wide"><label class="field"><span data-i18n="app.language">语言</span><select id="localeSelect"><option value="zh-CN">中文</option><option value="en">English</option></select></label><p class="setting-help" data-i18n="settings.languageHelp">同时用于插件界面和 Telegram 通知。</p></div>
 <label class="toggle"><span data-i18n="settings.handleEnabled">启用调度接管</span><input id="handleEnabled" type="checkbox"></label>
+<label class="field"><span data-i18n="settings.protectionFiveHour">5 小时保护阈值（剩余额度 %）</span><input id="protectionFiveHourPercent" type="number" min="0" max="100" step="0.1" value="10"></label>
+<label class="field"><span data-i18n="settings.protectionWeekly">周额度保护阈值（剩余额度 %）</span><input id="protectionWeeklyPercent" type="number" min="0" max="100" step="0.1" value="10"></label>
+<p class="setting-help wide" data-i18n="settings.protectionMonitorHelp">已开启保护的账号在剩余额度低于阈值加 20 个百分点时，每 5 分钟单独检查一次；达到阈值后停止使用（所有账号均不可用时仍可能进入 CPA 回退）。</p>
 <label class="toggle"><span data-i18n="settings.usageFeedback">失败反馈标记额度耗尽</span><input id="usageFeedback" type="checkbox"></label>
 <div class="setting-with-help wide"><label class="toggle"><span data-i18n="settings.enableResetProbe">自动激活新的额度周期</span><input id="enableResetProbe" name="enable_reset_probe" type="checkbox"></label><p class="setting-help" data-i18n="settings.enableResetProbeHelp">即使普通刷新处于休眠状态，Probe 也会按额度刷新间隔执行只读检查，最短 30 分钟；只有检测到延迟启动的重置窗口时，才发送一次极小请求。可能消耗少量额度。</p></div>
 <div class="setting-with-help wide"><label class="toggle"><span data-i18n="settings.provisionalProbe">账号列表未确认时仍允许额度探测（高风险）</span><input id="probeOnProvisionalRoster" name="probe_on_provisional_roster" type="checkbox"></label><p class="setting-help" data-i18n="settings.provisionalProbeHelp">CPA 暂时无法确认当前账号及优先级时，允许插件使用最近一次保存的账号列表执行额度重置探测。每次都会重新验证账号凭据，但仍无法保证账号未被删除或调整优先级。通常应保持关闭。</p></div>
@@ -1546,7 +1584,7 @@ var statusTemplateV2 = template.Must(template.New("status-v2").Funcs(template.Fu
 </div>
 </main>
 </div>
-<dialog id="editDialog"><form method="dialog" class="dialogBody"><div class="dialogHead"><div><h2 data-i18n="edit.title">编辑账号</h2><p id="editAuthID"></p></div><button type="button" id="closeDialog" class="ghost" data-i18n="actions.close">关闭</button></div><div class="dialogGrid"><label class="field"><span data-i18n="edit.alias">别名</span><input id="editAlias"></label><label class="field"><span data-i18n="account.schedulerPriority">插件优先级</span><input id="editSchedulerPriority" type="number" step="1" value="0"></label><label class="field"><span data-i18n="edit.groupID">分组 ID</span><input id="editGroupID" placeholder="team-a"></label><label class="field"><span data-i18n="edit.groupName">分组名称</span><input id="editGroupName"></label><label class="field"><span data-i18n="edit.tags">标签</span><input id="editTags" placeholder="team, paid"></label><label class="field wide"><span data-i18n="edit.notes">账号备注</span><textarea id="editNotes"></textarea></label><label class="field wide"><span data-i18n="edit.groupNotes">分组备注</span><textarea id="editGroupNotes"></textarea></label></div><div class="dialogActions"><button type="button" id="saveAccount" class="secondary" data-i18n="actions.saveAccount">保存账号</button><button type="button" id="cancelEdit" class="ghost" data-i18n="actions.cancel">取消</button></div></form></dialog>
+<dialog id="editDialog"><form method="dialog" class="dialogBody"><div class="dialogHead"><div><h2 data-i18n="edit.title">编辑账号</h2><p id="editAuthID"></p></div><button type="button" id="closeDialog" class="ghost" data-i18n="actions.close">关闭</button></div><div class="dialogGrid"><label class="field"><span data-i18n="edit.alias">别名</span><input id="editAlias"></label><label class="field"><span data-i18n="account.schedulerPriority">插件优先级</span><input id="editSchedulerPriority" type="number" step="1" value="0"></label><label class="toggle wide"><span data-i18n="edit.protection">保护模式</span><input id="editProtectionEnabled" type="checkbox"></label><label class="field"><span data-i18n="edit.groupID">分组 ID</span><input id="editGroupID" placeholder="team-a"></label><label class="field"><span data-i18n="edit.groupName">分组名称</span><input id="editGroupName"></label><label class="field"><span data-i18n="edit.tags">标签</span><input id="editTags" placeholder="team, paid"></label><label class="field wide"><span data-i18n="edit.notes">账号备注</span><textarea id="editNotes"></textarea></label><label class="field wide"><span data-i18n="edit.groupNotes">分组备注</span><textarea id="editGroupNotes"></textarea></label></div><div class="dialogActions"><button type="button" id="saveAccount" class="secondary" data-i18n="actions.saveAccount">保存账号</button><button type="button" id="cancelEdit" class="ghost" data-i18n="actions.cancel">取消</button></div></form></dialog>
 <script>
 let STATUS={{json .}};
 const MANAGEMENT_BASE='/v0/management/plugins/codex-fleet-manager';
@@ -1579,6 +1617,22 @@ const TRANSLATIONS={
     'notice.settingsSaved':'设置已保存，页面内容会自动更新。','notice.statusLoaded':'已加载当前设置。请确认后再次保存。','notice.refreshRequested':'已请求后台刷新额度，页面内容会自动更新。','notice.accountSaved':'账号卡片已保存，页面内容会自动更新。','notice.accountPinned':'账号已固定，插件优先级已设为 999。','notice.accountUnpinned':'已取消固定，插件优先级已重置为 0。','notice.refreshOneRequested':'已请求刷新该账号额度，页面内容会自动更新。','notice.configExported':'配置已导出。','notice.logsExported':'日志已导出。','notice.configImported':'配置已导入，页面内容会自动更新。','error.requestFailed':'请求失败：{status}','error.managementKeyRequired':'需要填写 CPA 管理密钥','error.schedulerPriorityInteger':'插件优先级必须是安全整数。'
   }
 };
+TRANSLATIONS.en['settings.protectionFiveHour']='5-hour protection threshold (remaining %)';
+TRANSLATIONS.en['settings.protectionWeekly']='Weekly protection threshold (remaining %)';
+TRANSLATIONS.en['settings.protectionMonitorHelp']='Protected accounts are checked every 5 minutes when remaining quota falls below the threshold plus 20 percentage points. At the threshold, CFM stops selecting them unless all accounts are unavailable and CPA fallback is used.';
+TRANSLATIONS.en['edit.protection']='Protection mode';
+TRANSLATIONS.en['account.protected']='Protected';
+TRANSLATIONS.en['account.protectionOn']='Protection On';
+TRANSLATIONS.en['due.protectionCheck']='Protection check due';
+TRANSLATIONS.en['error.protectionThreshold']='Protection thresholds must be between 0 and 100%.';
+TRANSLATIONS['zh-CN']['settings.protectionFiveHour']='5 小时保护阈值（剩余额度 %）';
+TRANSLATIONS['zh-CN']['settings.protectionWeekly']='周额度保护阈值（剩余额度 %）';
+TRANSLATIONS['zh-CN']['settings.protectionMonitorHelp']='已开启保护的账号在剩余额度低于阈值加 20 个百分点时，每 5 分钟单独检查一次；达到阈值后停止使用（所有账号均不可用时仍可能进入 CPA 回退）。';
+TRANSLATIONS['zh-CN']['edit.protection']='保护模式';
+TRANSLATIONS['zh-CN']['account.protected']='受保护';
+TRANSLATIONS['zh-CN']['account.protectionOn']='保护已开启';
+TRANSLATIONS['zh-CN']['due.protectionCheck']='保护额度待检查';
+TRANSLATIONS['zh-CN']['error.protectionThreshold']='保护阈值必须在 0% 到 100% 之间。';
 TRANSLATIONS.en['telegram.title']='Telegram Notifications';
 TRANSLATIONS.en['telegram.help']='Send a notification in the plugin language when one or more Codex accounts receive HTTP 401 or invalid_grant and require re-login. Events within 15 seconds are combined.';
 TRANSLATIONS.en['settings.languageHelp']='Used for both the plugin interface and Telegram notifications.';
@@ -1709,7 +1763,7 @@ const RETRY_SIZE_RE=/^\d+(\.\d+)?(B|KB|MB|GB|TB|KiB|MiB|GiB|TiB)$/i;
 const RETRY_DURATION_FIELDS=[['retry_stall_timeout','retry.stallTimeout'],['retry_hold_timeout','retry.holdTimeout'],['retry_chain_deadline','retry.chainDeadline']];
 function retryPayloadError(payload){const attempts=Number(payload.retry_max_attempts);if(!Number.isSafeInteger(attempts)||attempts<1||attempts>16)return {key:'retry.error.attempts',field:'retry.maxAttempts',value:payload.retry_max_attempts};const frames=Number(payload.retry_max_frames);if(!Number.isSafeInteger(frames)||frames<1)return {key:'retry.error.frames',field:'retry.maxFrames',value:payload.retry_max_frames};if(!RETRY_SIZE_RE.test(String(payload.retry_max_bytes||'')))return {key:'retry.error.size',field:'retry.maxBytes',value:payload.retry_max_bytes};for(const pair of RETRY_DURATION_FIELDS){if(!RETRY_DURATION_RE.test(String(payload[pair[0]]||'')))return {key:'retry.error.duration',field:pair[1],value:payload[pair[0]]}}if(payload.retry_shadow&&payload.retry_always)return {key:'retry.modes'};if(payload.retry_enabled&&!payload.retry_always){if(!Array.isArray(payload.retry_chain)||payload.retry_chain.length===0)return {key:'retry.invalidRow'};for(const row of payload.retry_chain){if(!row.model||!Array.isArray(row.fallbacks)||row.fallbacks.length===0)return {key:'retry.invalidRow'}}}return null}
 function retryProblemMessage(problem){const label=problem.field?t(problem.field):'';const value=problem.value===undefined||problem.value===null?'':String(problem.value).trim();const detail=[label,value].filter(Boolean).join(': ');return detail?t(problem.key)+' ('+detail+')':t(problem.key)}
-async function saveRetrySettings(){try{if(!statusLoaded){await loadStatus();return}const payload=collectSettingsPayload();const problem=retryPayloadError(payload);if(problem){showNotice(retryProblemMessage(problem),true,problem.key);return}await requestManagement('/settings',{method:'PUT',body:payload});settingsDirty=false;showNotice(t('notice.retrySaved'),false,'notice.retrySaved');await refreshStatus({management:true,fillSettings:true});await refreshRetryStats()}catch(error){showNotice(error.message||String(error),true)}}
+async function saveRetrySettings(){try{if(!statusLoaded){await loadStatus();return}const payload=collectSettingsPayloadWithProtection();const problem=retryPayloadError(payload);if(problem){showNotice(retryProblemMessage(problem),true,problem.key);return}await requestManagement('/settings',{method:'PUT',body:payload});settingsDirty=false;showNotice(t('notice.retrySaved'),false,'notice.retrySaved');await refreshStatus({management:true,fillSettings:true});await refreshRetryStats()}catch(error){showNotice(error.message||String(error),true)}}
 async function requestManagementRoot(path,query){const headers=authHeaders();let url='/v0/management'+path;if(query){const params=new URLSearchParams(query);url+='?'+params.toString()}const resp=await fetch(url,{method:'GET',headers});const data=await readJSON(resp);if(!resp.ok){const message=data.error||data.message||t('error.requestFailed',{status:resp.status});throw new Error(message)}return data}
 async function requestManagementText(path,options){const opts=options||{};const headers=authHeaders();if(opts.contentType)headers['Content-Type']=opts.contentType;const init={method:opts.method||'GET',headers};if(Object.prototype.hasOwnProperty.call(opts,'body'))init.body=String(opts.body);const resp=await fetch('/v0/management'+path,init);const body=await resp.text();if(!resp.ok){let message=body;try{const data=JSON.parse(body);message=data.error||data.message||body}catch(error){}throw new Error(message||t('error.requestFailed',{status:resp.status}))}return body}
 function cpaRetrySettingsCorrect(config){const codex=config&&config.codex||{};const streaming=config&&config.streaming||{};return Number(config&&config['request-retry'])===3&&codex['stream-bootstrap-buffering']===true&&String(codex['stream-bootstrap-timeout']===undefined?'':codex['stream-bootstrap-timeout'])==='0'&&Number(streaming['bootstrap-retries'])===1}
@@ -1777,10 +1831,11 @@ function detectLocale(){return storedLocale()||parentLocale()||'en'}
 function watchParentLocale(){try{if(window.parent===window)return;const root=window.parent.document.documentElement;new MutationObserver(()=>{if(storedLocale())return;const next=parentLocale();if(next&&next!==currentLocale){currentLocale=next;applyLocale()}}).observe(root,{attributes:true,attributeFilter:['lang']})}catch(error){}}
 function t(key,params){const dictionary=TRANSLATIONS[currentLocale]||TRANSLATIONS.en;let message=dictionary[key]||TRANSLATIONS.en[key]||key;for(const name of Object.keys(params||{})){message=message.split('{'+name+'}').join(String(params[name]))}return message}
 function labelFrom(table,key,fallback){const dictionary=table[currentLocale]||table.en;return dictionary[key]||fallback||key||''}
-function labelDueReason(reason){return labelFrom(DUE_REASON_LABELS,reason,reason)}
-function labelUnavailableReason(reason){return labelFrom(UNAVAILABLE_REASON_LABELS,reason,reason||'不可用')}
+function labelDueReason(reason){if(reason==='protection_check_due')return t('due.protectionCheck');return labelFrom(DUE_REASON_LABELS,reason,reason)}
+function labelUnavailableReason(reason){if(reason==='weekly_protected'||reason==='five_hour_protected')return t('account.protected');return labelFrom(UNAVAILABLE_REASON_LABELS,reason,reason||'不可用')}
 function translateInlineText(raw){let text=String(raw||'');if(currentLocale!=='en')return text;for(const pair of SORTED_INLINE_TRANSLATIONS){text=text.split(pair[0]).join(pair[1])}return text}
-function applyInlineTranslations(){const nodes=document.querySelectorAll('.badge,.quota-title,.quota-remaining,.quota-reset,.kv span,.cardActions button,.empty,.empty strong,.empty div');for(const node of nodes){if(node.children.length>0)continue;if(!node.dataset.rawText)node.dataset.rawText=node.textContent;node.textContent=translateInlineText(node.dataset.rawText)}formatLocalTimes()}
+function applyInlineTranslations(){const nodes=document.querySelectorAll('.badge,.quota-title,.quota-remaining,.quota-reset,.kv span,.cardActions button,.empty,.empty strong,.empty div');for(const node of nodes){if(node.children.length>0)continue;if(!node.dataset.rawText)node.dataset.rawText=node.textContent;node.textContent=translateInlineText(node.dataset.rawText)}renderProtectionIndicators();formatLocalTimes()}
+function renderProtectionIndicators(){for(const card of document.querySelectorAll('section.queue .card[data-auth-id]')){const badges=card.querySelector('.badges');if(!badges)continue;const existing=badges.querySelector('.protectionIndicator');const account=accountsByID.get(card.dataset.authId||'');if(!account||account.protection_enabled!==true){if(existing)existing.remove();continue}if(existing){existing.textContent=t('account.protectionOn');continue}badges.append(node('span','badge protectionIndicator',t('account.protectionOn')))}}
 function applyLocale(){document.documentElement.lang=currentLocale;document.title=t('app.title');localeSelect.value=currentLocale;for(const node of document.querySelectorAll('[data-i18n]')){node.textContent=t(node.dataset.i18n)}for(const node of document.querySelectorAll('[data-i18n-placeholder]')){node.setAttribute('placeholder',t(node.dataset.i18nPlaceholder))}for(const node of document.querySelectorAll('[data-i18n-aria]')){node.setAttribute('aria-label',t(node.dataset.i18nAria))}for(const node of document.querySelectorAll('.localeColon'))node.textContent=currentLocale==='en'?': ':'：';if(notice.dataset.i18nKey)notice.textContent=t(notice.dataset.i18nKey);for(const container of document.querySelectorAll('.retryFallbacks'))renumberRetryFallbacks(container);renderMetrics();renderAccounts(STATUS.accounts||[]);applyInlineTranslations();renderLogs(STATUS.logs||[]);updateTelegramTokenStatus();renderPluginUpdate()}
 function changeLocale(locale){currentLocale=normalizeLocale(locale);try{window.localStorage.setItem(LOCALE_STORAGE_KEY,currentLocale)}catch(error){}applyLocale()}
 let restoredManagementKey=false;
@@ -1798,12 +1853,14 @@ function settingsFocusedOrDirty(){const panels=[document.getElementById('setting
 function updateResetProbeWarning(){const warning=document.getElementById('resetProbeWarning');if(warning)warning.hidden=!(statusLoaded&&STATUS.settings&&STATUS.settings.enable_reset_probe!==true)}
 function updateProtectedVisibility(){const loaded=statusLoaded;const show=(id,visible)=>{const item=document.getElementById(id);if(item)item.hidden=!visible};show('settingsPanel',loaded);show('refreshQuota',loaded);show('loadData',!loaded);showPage(requestedPage(),false);updateResetProbeWarning()}
 function renderRosterLifecycle(){const warning=document.getElementById('rosterLifecycleWarning');const title=document.getElementById('rosterLifecycleTitle');const body=document.getElementById('rosterLifecycleBody');if(!warning||!title||!body)return;const roster=STATUS.roster||{};const messages=[roster.warning,roster.risk_warning].filter(Boolean);warning.hidden=messages.length===0;title.textContent=[roster.capability,roster.health].filter(Boolean).join(' / ')||'Roster lifecycle';body.textContent=messages.join(' ')}
-function applyStatus(data,options){STATUS=data;statusLoaded=true;rebuildDerivedState();const shouldFillSettings=(options&&options.fillSettings)||!settingsInitialized||!settingsFocusedOrDirty();if(shouldFillSettings){fillSettings();settingsInitialized=true}renderMetrics();renderRosterLifecycle();renderAccounts(STATUS.accounts||[]);renderLogs(STATUS.logs||[]);updateProtectedVisibility();applyLocale();if(!retryPage.hidden)refreshRetryStats()}
+function applyStatus(data,options){STATUS=data;statusLoaded=true;rebuildDerivedState();const shouldFillSettings=(options&&options.fillSettings)||!settingsInitialized||!settingsFocusedOrDirty();if(shouldFillSettings){fillSettings();fillProtectionSettings();settingsInitialized=true}renderMetrics();renderRosterLifecycle();renderAccounts(STATUS.accounts||[]);renderLogs(STATUS.logs||[]);updateProtectedVisibility();applyLocale();if(!retryPage.hidden)refreshRetryStats()}
 async function refreshStatus(options){const opts=options||{};const data=await requestManagement('/status',{query:{format:'json'}});applyStatus(data,opts)}
 function startStatusPolling(){if(statusPollID)return;statusPollID=window.setInterval(()=>refreshStatus({management:true}).catch(()=>{}),15000)}
 async function loadStatus(){try{await refreshStatus({management:true,fillSettings:true});await checkPluginUpdate();const remember=document.getElementById('rememberManagementKey');if(remember&&remember.checked&&hasManagementKey()){restoredManagementKey=true;syncManagementKeyVisibility()}showNotice(t('notice.statusLoaded'),false,'notice.statusLoaded');startStatusPolling()}catch(error){showNotice(error.message||String(error),true)}}
 async function pollStatus(times,delayMs){for(let i=0;i<times;i++){await new Promise((resolve)=>window.setTimeout(resolve,delayMs));await refreshStatus()}}
 function collectSettingsPayload(){return{handle_enabled:document.getElementById('handleEnabled').checked,enable_usage_feedback:document.getElementById('usageFeedback').checked,enable_reset_probe:document.getElementById('enableResetProbe').checked,probe_on_provisional_roster:document.getElementById('probeOnProvisionalRoster').checked,monthly_mode:document.getElementById('monthlyMode').value,quota_refresh_interval:document.getElementById('refreshInterval').value.trim(),stale_after:document.getElementById('staleAfter').value.trim(),refresh_active_window:document.getElementById('refreshActiveWindow').value.trim(),refresh_after_reset_delay:document.getElementById('refreshAfterResetDelay').value.trim(),refresh_retry_delays:document.getElementById('refreshRetryDelays').value.trim(),refresh_on_startup:document.getElementById('refreshOnStartup').checked,max_refresh_concurrency:Number.parseInt(document.getElementById('maxConcurrency').value,10)||1,circuit_failure_threshold:Number.parseInt(document.getElementById('circuitFailureThreshold').value,10)||5,circuit_open_duration:document.getElementById('circuitOpenDuration').value.trim(),circuit_half_open_success_threshold:Number.parseInt(document.getElementById('circuitHalfOpenSuccessThreshold').value,10)||2,max_log_entries:Number.parseInt(document.getElementById('maxLogEntries').value,10)||200,log_retention:document.getElementById('logRetention').value.trim(),telegram_notifications_enabled:document.getElementById('telegramEnabled').checked===true,telegram_chat_id:document.getElementById('telegramChatID').value.trim(),telegram_language:currentLocale,telegram_bot_token:document.getElementById('telegramBotToken').value.trim(),telegram_remove_bot_token:document.getElementById('telegramRemoveToken').checked===true,retry_enabled:retryElement('retryEnabled').checked===true,retry_shadow:retryElement('retryShadow').checked===true,retry_always:retryElement('retryAlways').checked===true,retry_strip_reasoning:retryElement('retryStripReasoning').checked!==false,retry_max_attempts:retryIntValue('retryMaxAttempts',4),retry_max_frames:retryIntValue('retryMaxFrames',4096),retry_stall_timeout:retryDurationValue('retryStallTimeout','60s'),retry_hold_timeout:retryDurationValue('retryHoldTimeout','90s'),retry_chain_deadline:retryDurationValue('retryChainDeadline','240s'),retry_max_bytes:retryTextValue('retryMaxBytes','8MB'),retry_chain:collectRetryChainRows()}}
+function collectSettingsPayloadWithProtection(){const payload=collectSettingsPayload();for(const [id,key] of [['protectionFiveHourPercent','protection_five_hour_percent'],['protectionWeeklyPercent','protection_weekly_percent']]){const input=document.getElementById(id);const value=input.valueAsNumber;if(!Number.isFinite(value)||value<0||value>100)throw new Error(t('error.protectionThreshold'));payload[key]=value}return payload}
+function fillProtectionSettings(){const s=STATUS.settings||{};document.getElementById('protectionFiveHourPercent').value=s.protection_five_hour_percent??10;document.getElementById('protectionWeeklyPercent').value=s.protection_weekly_percent??10}
 function node(tag,className,text){const item=document.createElement(tag);if(className)item.className=className;if(text!==undefined)item.textContent=text;return item}
 function addKV(parent,key,value){parent.append(node('span','',key),node('span','',value||'暂无'))}
 function addBadge(text,className){return node('span','badge '+(className||''),text)}
@@ -1826,13 +1883,13 @@ function autoEnableTelegramNotifications(){if(telegramCredentialsReady())documen
 function handleTelegramRemoveChange(){const remove=document.getElementById('telegramRemoveToken');if(!remove.checked)autoEnableTelegramNotifications()}
 function updateTelegramTokenStatus(){const s=STATUS.settings||{};const status=document.getElementById('telegramTokenStatus');const remove=document.getElementById('telegramRemoveToken');if(!status||!remove)return;const configured=s.telegram_bot_token_configured===true;status.textContent=t(configured?'telegram.tokenConfigured':'telegram.tokenMissing');status.classList.toggle('configured',configured);remove.disabled=!configured;remove.checked=false}
 function fillSettings(){const s=STATUS.settings||{};if(s.telegram_language==='zh-CN'||s.telegram_language==='en')changeLocale(s.telegram_language);document.getElementById('handleEnabled').checked=s.handle_enabled!==false;document.getElementById('usageFeedback').checked=s.enable_usage_feedback!==false;document.getElementById('enableResetProbe').checked=s.enable_reset_probe===true;document.getElementById('probeOnProvisionalRoster').checked=s.probe_on_provisional_roster===true;document.getElementById('monthlyMode').value=s.monthly_mode||'expiry_order';document.getElementById('refreshInterval').value=s.quota_refresh_interval||'30m0s';document.getElementById('staleAfter').value=s.stale_after||'5h0m0s';document.getElementById('refreshActiveWindow').value=s.refresh_active_window||'1h0m0s';document.getElementById('refreshAfterResetDelay').value=s.refresh_after_reset_delay||'1m0s';document.getElementById('refreshRetryDelays').value=s.refresh_retry_delays||'1m0s,5m0s,15m0s';document.getElementById('refreshOnStartup').checked=s.refresh_on_startup===true;document.getElementById('maxConcurrency').value=s.max_refresh_concurrency||1;document.getElementById('circuitFailureThreshold').value=s.circuit_failure_threshold||5;document.getElementById('circuitOpenDuration').value=s.circuit_open_duration||'30m0s';document.getElementById('circuitHalfOpenSuccessThreshold').value=s.circuit_half_open_success_threshold||2;document.getElementById('maxLogEntries').value=s.max_log_entries||200;document.getElementById('logRetention').value=s.log_retention||'24h0m0s';document.getElementById('telegramEnabled').checked=s.telegram_notifications_enabled===true;document.getElementById('telegramChatID').value=s.telegram_chat_id||'';document.getElementById('telegramBotToken').value='';updateTelegramTokenStatus();autoEnableTelegramNotifications();fillRetrySettings()}
-async function saveSettings(){try{if(!statusLoaded){await loadStatus();return false}await requestManagement('/settings',{method:'PUT',body:collectSettingsPayload()});document.getElementById('telegramBotToken').value='';document.getElementById('telegramRemoveToken').checked=false;settingsDirty=false;showNotice(t('notice.settingsSaved'),false,'notice.settingsSaved');await refreshStatus({management:true,fillSettings:true});return true}catch(error){showNotice(error.message||String(error),true);return false}}
+async function saveSettings(){try{if(!statusLoaded){await loadStatus();return false}await requestManagement('/settings',{method:'PUT',body:collectSettingsPayloadWithProtection()});document.getElementById('telegramBotToken').value='';document.getElementById('telegramRemoveToken').checked=false;settingsDirty=false;showNotice(t('notice.settingsSaved'),false,'notice.settingsSaved');await refreshStatus({management:true,fillSettings:true});return true}catch(error){showNotice(error.message||String(error),true);return false}}
 async function sendTelegramTest(){const button=document.getElementById('telegramTest');const status=document.getElementById('telegramTestStatus');const removing=document.getElementById('telegramRemoveToken').checked===true;const enabled=document.getElementById('telegramEnabled').checked===true;if(button)button.disabled=true;if(status)status.textContent=t('telegram.testSending');try{if(!await saveSettings()){if(status)status.textContent='';return}if(removing||!enabled){if(status)status.textContent=t('telegram.disabled');showNotice(t('telegram.disabled'),false);return}await requestManagement('/telegram/test',{method:'POST'});if(status)status.textContent=t('telegram.testSent');showNotice(t('telegram.testSent'),false)}catch(error){if(status)status.textContent=error.message||String(error);showNotice(error.message||String(error),true)}finally{if(button)button.disabled=false}}
 async function refreshQuota(){try{await requestManagement('/refresh',{method:'POST'});showNotice(t('notice.refreshRequested'),false,'notice.refreshRequested');await refreshStatus({management:true});pollStatus(3,1200)}catch(error){showNotice(error.message||String(error),true)}}
 function splitTags(text){return text.split(',').map((item)=>item.trim()).filter(Boolean)}
-function openEdit(authID){if(!hasManagementKey()){showNotice(t('error.managementKeyRequired'),true,'error.managementKeyRequired');return}const account=accountsByID.get(authID)||{};editingAuthID=authID;document.getElementById('editAuthID').textContent=authID;document.getElementById('editAlias').value=account.alias||'';document.getElementById('editSchedulerPriority').value=account.scheduler_priority||0;document.getElementById('editNotes').value=account.notes||'';document.getElementById('editGroupID').value=account.group_id||'';document.getElementById('editGroupName').value=account.group||'';document.getElementById('editGroupNotes').value=account.group_notes||'';document.getElementById('editTags').value=(account.tags||[]).join(', ');editDialog.showModal()}
+function openEdit(authID){if(!hasManagementKey()){showNotice(t('error.managementKeyRequired'),true,'error.managementKeyRequired');return}const account=accountsByID.get(authID)||{};editingAuthID=authID;document.getElementById('editAuthID').textContent=authID;document.getElementById('editAlias').value=account.alias||'';document.getElementById('editSchedulerPriority').value=account.scheduler_priority||0;document.getElementById('editProtectionEnabled').checked=account.protection_enabled===true;document.getElementById('editNotes').value=account.notes||'';document.getElementById('editGroupID').value=account.group_id||'';document.getElementById('editGroupName').value=account.group||'';document.getElementById('editGroupNotes').value=account.group_notes||'';document.getElementById('editTags').value=(account.tags||[]).join(', ');editDialog.showModal()}
 function fillGroupFromID(){const groupID=document.getElementById('editGroupID').value.trim();const group=groupsByID.get(groupID);if(!group)return;if(!document.getElementById('editGroupName').value.trim())document.getElementById('editGroupName').value=group.name||'';if(!document.getElementById('editGroupNotes').value.trim())document.getElementById('editGroupNotes').value=group.notes||''}
-async function saveAccountModal(){if(!editingAuthID)return;const groupID=document.getElementById('editGroupID').value.trim();const groupName=document.getElementById('editGroupName').value.trim();const groupNotes=document.getElementById('editGroupNotes').value.trim();const schedulerPriority=document.getElementById('editSchedulerPriority').valueAsNumber;if(!Number.isSafeInteger(schedulerPriority)){showNotice(t('error.schedulerPriorityInteger'),true,'error.schedulerPriorityInteger');return}try{await requestManagement('/annotations/account',{method:'PATCH',body:{auth_id:editingAuthID,alias:document.getElementById('editAlias').value,notes:document.getElementById('editNotes').value,tags:splitTags(document.getElementById('editTags').value),group_id:groupID,scheduler_priority:schedulerPriority}});const existingGroup=groupsByID.get(groupID)||{name:'',notes:''};if(groupID&&(groupName!==existingGroup.name||groupNotes!==existingGroup.notes)){await requestManagement('/annotations/group',{method:'PATCH',body:{id:groupID,name:groupName,notes:groupNotes}});groupsByID.set(groupID,{name:groupName,notes:groupNotes})}showNotice(t('notice.accountSaved'),false,'notice.accountSaved');editDialog.close();await refreshStatus()}catch(error){showNotice(error.message||String(error),true)}}
+async function saveAccountModal(){if(!editingAuthID)return;const groupID=document.getElementById('editGroupID').value.trim();const groupName=document.getElementById('editGroupName').value.trim();const groupNotes=document.getElementById('editGroupNotes').value.trim();const schedulerPriority=document.getElementById('editSchedulerPriority').valueAsNumber;if(!Number.isSafeInteger(schedulerPriority)){showNotice(t('error.schedulerPriorityInteger'),true,'error.schedulerPriorityInteger');return}try{await requestManagement('/annotations/account',{method:'PATCH',body:{auth_id:editingAuthID,alias:document.getElementById('editAlias').value,notes:document.getElementById('editNotes').value,tags:splitTags(document.getElementById('editTags').value),group_id:groupID,scheduler_priority:schedulerPriority,protection_enabled:document.getElementById('editProtectionEnabled').checked}});const existingGroup=groupsByID.get(groupID)||{name:'',notes:''};if(groupID&&(groupName!==existingGroup.name||groupNotes!==existingGroup.notes)){await requestManagement('/annotations/group',{method:'PATCH',body:{id:groupID,name:groupName,notes:groupNotes}});groupsByID.set(groupID,{name:groupName,notes:groupNotes})}showNotice(t('notice.accountSaved'),false,'notice.accountSaved');editDialog.close();await refreshStatus()}catch(error){showNotice(error.message||String(error),true)}}
 async function togglePin(authID,pinned,button){if(!authID)return;if(!hasManagementKey()){showNotice(t('error.managementKeyRequired'),true,'error.managementKeyRequired');return}if(button)button.disabled=true;const priority=pinned?0:999;const noticeKey=pinned?'notice.accountUnpinned':'notice.accountPinned';try{await requestManagement('/annotations/account',{method:'PATCH',body:{auth_id:authID,scheduler_priority:priority}});showNotice(t(noticeKey),false,noticeKey);await refreshStatus()}catch(error){showNotice(error.message||String(error),true);if(button)button.disabled=false}}
 async function refreshOneQuota(authID){if(!authID)return;try{await requestManagement('/refresh/account',{method:'POST',body:{auth_id:authID}});showNotice(t('notice.refreshOneRequested'),false,'notice.refreshOneRequested');await refreshStatus();pollStatus(3,1200)}catch(error){showNotice(error.message||String(error),true)}}
 async function exportConfig(){try{const data=await requestManagement('/export');const blob=new Blob([JSON.stringify(data,null,2)+'\n'],{type:'application/json'});const link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download='codex-fleet-manager-config.json';link.click();URL.revokeObjectURL(link.href);showNotice(t('notice.configExported'),false,'notice.configExported');await refreshLogs()}catch(error){showNotice(error.message||String(error),true)}}

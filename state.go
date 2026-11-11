@@ -547,6 +547,9 @@ func (s *PluginState) DueAccounts(now time.Time) []AccountState {
 	accounts := make([]AccountState, 0)
 	for _, account := range s.accounts {
 		cloned := cloneAccountState(account)
+		if annotation, ok := s.annotations.Accounts[ResolveAnnotationKey(cloned)]; ok {
+			cloned.Annotation = cloneAccountAnnotation(annotation)
+		}
 		if due, reason := accountRefreshDue(cloned, cfg, now); due {
 			cloned.Refresh.DueReason = reason
 			accounts = append(accounts, cloned)
@@ -568,9 +571,7 @@ func (s *PluginState) NextRefreshDueAt(now time.Time) time.Time {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	cfg := NormalizeConfig(s.cfg)
-	if s.lastCodexActivityAt.IsZero() || !now.Before(s.lastCodexActivityAt.Add(cfg.RefreshActiveWindow)) {
-		return time.Time{}
-	}
+	active := !s.lastCodexActivityAt.IsZero() && now.Before(s.lastCodexActivityAt.Add(cfg.RefreshActiveWindow))
 	var next time.Time
 	consider := func(t time.Time) {
 		if t.IsZero() {
@@ -584,6 +585,15 @@ func (s *PluginState) NextRefreshDueAt(now time.Time) time.Time {
 		}
 	}
 	for _, account := range s.accounts {
+		if annotation, ok := s.annotations.Accounts[ResolveAnnotationKey(account)]; ok {
+			account.Annotation = annotation
+		}
+		if protectionDue := protectionCheckDueAt(account, cfg); !protectionDue.IsZero() {
+			consider(protectionDue)
+		}
+		if !active {
+			continue
+		}
 		if account.Refresh.AuthFailure || account.Refresh.LastFailureKind == RefreshFailureLocal {
 			continue
 		}
@@ -663,6 +673,9 @@ func accountRefreshDue(account AccountState, cfg Config, now time.Time) (bool, s
 	}
 	if !account.Refresh.NextRetryAt.IsZero() && account.Refresh.NextRetryAt.After(now) {
 		return false, "retry_wait"
+	}
+	if protectionDue := protectionCheckDueAt(account, cfg); !protectionDue.IsZero() && !protectionDue.After(now) {
+		return true, "protection_check_due"
 	}
 	if !account.Refresh.NextRetryAt.IsZero() && !account.Refresh.NextRetryAt.After(now) {
 		return true, "retry_due"

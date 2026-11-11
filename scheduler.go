@@ -36,6 +36,7 @@ const (
 	QueueStatusFiveHourExhausted   QueueStatus = "five_hour_exhausted"
 	QueueStatusLongWindowExhausted QueueStatus = "long_window_exhausted"
 	QueueStatusUnavailable         QueueStatus = "unavailable"
+	QueueStatusProtected           QueueStatus = "protected"
 )
 
 func HighestPriorityCodexAdmission(req pluginapi.SchedulerPickRequest) (CPAAdmissionState, bool) {
@@ -154,7 +155,7 @@ func buildOrderedAccounts(req pluginapi.SchedulerPickRequest, snapshot StateSnap
 			continue
 		}
 
-		queueStatus, available, reason, sortTime := accountQueueState(account, now)
+		queueStatus, available, reason, sortTime := accountQueueStateWithConfig(account, snapshot.Config, now)
 		view := accountViewFromState(account, snapshot.Config, now, trials)
 		selectionClass := ClassifyAccount(view, now)
 		if selectionClass == Excluded && available && view.Trial != TrialNone {
@@ -206,6 +207,10 @@ func accountAvailable(account AccountState, now time.Time) (bool, string) {
 }
 
 func accountQueueState(account AccountState, now time.Time) (QueueStatus, bool, string, time.Time) {
+	return accountQueueStateWithConfig(account, DefaultConfig(), now)
+}
+
+func accountQueueStateWithConfig(account AccountState, cfg Config, now time.Time) (QueueStatus, bool, string, time.Time) {
 	if account.Refresh.AuthFailure {
 		return QueueStatusUnavailable, false, "auth_failure", time.Time{}
 	}
@@ -214,6 +219,9 @@ func accountQueueState(account AccountState, now time.Time) (QueueStatus, bool, 
 	}
 	if account.Stale {
 		return QueueStatusUnavailable, false, "stale_quota", time.Time{}
+	}
+	if protected, reason := accountProtected(account, cfg); protected {
+		return QueueStatusProtected, false, reason, time.Time{}
 	}
 	circuit := effectiveCircuitState(account.Circuit, now)
 	if circuit.EffectiveState == CircuitStateOpen {

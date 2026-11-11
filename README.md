@@ -25,6 +25,15 @@ is independently improved and maintained. It is distributed under the MIT
 License and preserves the original project's copyright and license notices. It
 is not an official successor or endorsed release of the original project.
 
+## Unreleased Highlights
+
+- Added per-account Protection mode with separate, configurable five-hour and
+  weekly remaining-quota thresholds (both default to 10%).
+- When a protected account enters the near-threshold band, CFM checks that
+  account every five minutes, even while routine refresh is dormant.
+- Added a persistent Protection On badge and a Protected status when a quota
+  reaches its threshold.
+
 ## v0.4.3 Highlights
 
 - Added a bilingual red update notice directly below the account-queue
@@ -78,6 +87,32 @@ is not an official successor or endorsed release of the original project.
   pressure rather than a static account order.
 - Optional reset-window activation and deadline-driven quota refresh.
 - Bilingual Management UI, account annotations, priorities, and JSON backup.
+
+## Account Protection
+
+Open an account's **Edit** dialog to enable **Protection mode** for that
+account. The account card then shows **Protection On** even while the account
+is still available. In **Settings**, set the five-hour and weekly remaining-
+quota thresholds separately; both default to 10%. The weekly threshold applies
+to weekly accounts. A missing optional five-hour window does not activate the
+five-hour threshold.
+
+After a successful quota refresh reports less than the relevant threshold plus
+20 percentage points remaining (for example, below 30% for a 10% threshold),
+CFM checks that account every five minutes. These targeted checks continue
+even while routine quota refresh is dormant. At or below the threshold, the
+account shows **Protected** and CFM skips it while another account is usable.
+The extra five-minute checks stop while it is Protected; the account leaves
+that status only after a successful refresh reports quota above the threshold.
+If every account is unavailable, the existing CPA Fill First fallback may still
+select a protected account.
+
+Protection uses the latest reported quota, not a live per-request balance.
+A request can cross the threshold between checks, so the configured percentage
+is not a guaranteed hard floor. When a five-hour window resets, the reset
+timestamp alone does not clear Protected: a new successful quota refresh must
+confirm the recovered balance. If routine refresh is dormant, a manual account
+refresh or later activity may be needed to obtain that confirmation.
 
 ## Telegram Authentication Alerts
 

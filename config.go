@@ -57,6 +57,8 @@ type Config struct {
 	TelegramNotificationsEnabled    bool
 	TelegramChatID                  string
 	TelegramLanguage                string
+	ProtectionFiveHourPercent       *float64
+	ProtectionWeeklyPercent         *float64
 
 	// Retry chain. RetryEnabled is the kill switch: when it is false every
 	// request keeps today's behavior. RetryChain is empty by default, which is
@@ -97,28 +99,30 @@ type registrationCapabilities struct {
 }
 
 type rawConfig struct {
-	HandleEnabled                   *bool  `yaml:"handle_enabled"`
-	QuotaRefreshInterval            string `yaml:"quota_refresh_interval"`
-	StaleAfter                      string `yaml:"stale_after"`
-	MonthlyMode                     string `yaml:"monthly_mode"`
-	Fallback                        string `yaml:"fallback"`
-	EnableUsageFeedback             *bool  `yaml:"enable_usage_feedback"`
-	EnableResetProbe                *bool  `yaml:"enable_reset_probe"`
-	ProbeOnProvisionalRoster        *bool  `yaml:"probe_on_provisional_roster"`
-	MaxRefreshConcurrency           *int   `yaml:"max_refresh_concurrency"`
-	QuotaEndpoint                   string `yaml:"quota_endpoint"`
-	RefreshActiveWindow             string `yaml:"refresh_active_window"`
-	RefreshAfterResetDelay          string `yaml:"refresh_after_reset_delay"`
-	RefreshRetryDelays              string `yaml:"refresh_retry_delays"`
-	RefreshOnStartup                *bool  `yaml:"refresh_on_startup"`
-	CircuitFailureThreshold         *int   `yaml:"circuit_failure_threshold"`
-	CircuitOpenDuration             string `yaml:"circuit_open_duration"`
-	CircuitHalfOpenSuccessThreshold *int   `yaml:"circuit_half_open_success_threshold"`
-	MaxLogEntries                   *int   `yaml:"max_log_entries"`
-	LogRetention                    string `yaml:"log_retention"`
-	TelegramNotificationsEnabled    *bool  `yaml:"telegram_notifications_enabled"`
-	TelegramChatID                  string `yaml:"telegram_chat_id"`
-	TelegramLanguage                string `yaml:"telegram_language"`
+	HandleEnabled                   *bool    `yaml:"handle_enabled"`
+	QuotaRefreshInterval            string   `yaml:"quota_refresh_interval"`
+	StaleAfter                      string   `yaml:"stale_after"`
+	MonthlyMode                     string   `yaml:"monthly_mode"`
+	Fallback                        string   `yaml:"fallback"`
+	EnableUsageFeedback             *bool    `yaml:"enable_usage_feedback"`
+	EnableResetProbe                *bool    `yaml:"enable_reset_probe"`
+	ProbeOnProvisionalRoster        *bool    `yaml:"probe_on_provisional_roster"`
+	MaxRefreshConcurrency           *int     `yaml:"max_refresh_concurrency"`
+	QuotaEndpoint                   string   `yaml:"quota_endpoint"`
+	RefreshActiveWindow             string   `yaml:"refresh_active_window"`
+	RefreshAfterResetDelay          string   `yaml:"refresh_after_reset_delay"`
+	RefreshRetryDelays              string   `yaml:"refresh_retry_delays"`
+	RefreshOnStartup                *bool    `yaml:"refresh_on_startup"`
+	CircuitFailureThreshold         *int     `yaml:"circuit_failure_threshold"`
+	CircuitOpenDuration             string   `yaml:"circuit_open_duration"`
+	CircuitHalfOpenSuccessThreshold *int     `yaml:"circuit_half_open_success_threshold"`
+	MaxLogEntries                   *int     `yaml:"max_log_entries"`
+	LogRetention                    string   `yaml:"log_retention"`
+	TelegramNotificationsEnabled    *bool    `yaml:"telegram_notifications_enabled"`
+	TelegramChatID                  string   `yaml:"telegram_chat_id"`
+	TelegramLanguage                string   `yaml:"telegram_language"`
+	ProtectionFiveHourPercent       *float64 `yaml:"protection_five_hour_percent"`
+	ProtectionWeeklyPercent         *float64 `yaml:"protection_weekly_percent"`
 
 	RetryEnabled        *bool           `yaml:"retry_enabled"`
 	RetryShadow         *bool           `yaml:"retry_shadow"`
@@ -155,6 +159,8 @@ func DefaultConfig() Config {
 		LogRetention:                    24 * time.Hour,
 		TelegramNotificationsEnabled:    false,
 		TelegramLanguage:                "en",
+		ProtectionFiveHourPercent:       float64Ptr(10),
+		ProtectionWeeklyPercent:         float64Ptr(10),
 
 		RetryEnabled:        false,
 		RetryShadow:         false,
@@ -171,6 +177,14 @@ func DefaultConfig() Config {
 
 func NormalizeConfig(cfg Config) Config {
 	defaults := DefaultConfig()
+	if cfg.ProtectionFiveHourPercent == nil {
+		value := 10.0
+		cfg.ProtectionFiveHourPercent = &value
+	}
+	if cfg.ProtectionWeeklyPercent == nil {
+		value := 10.0
+		cfg.ProtectionWeeklyPercent = &value
+	}
 	if cfg.QuotaRefreshInterval <= 0 {
 		cfg.QuotaRefreshInterval = defaults.QuotaRefreshInterval
 	}
@@ -386,6 +400,18 @@ func DecodeConfig(raw []byte) (Config, error) {
 			return Config{}, fmt.Errorf("telegram_language must be en or zh-CN")
 		}
 		cfg.TelegramLanguage = decoded.TelegramLanguage
+	}
+	if decoded.ProtectionFiveHourPercent != nil {
+		if !validProtectionThreshold(*decoded.ProtectionFiveHourPercent) {
+			return Config{}, fmt.Errorf("protection_five_hour_percent must be between 0 and 100")
+		}
+		cfg.ProtectionFiveHourPercent = decoded.ProtectionFiveHourPercent
+	}
+	if decoded.ProtectionWeeklyPercent != nil {
+		if !validProtectionThreshold(*decoded.ProtectionWeeklyPercent) {
+			return Config{}, fmt.Errorf("protection_weekly_percent must be between 0 and 100")
+		}
+		cfg.ProtectionWeeklyPercent = decoded.ProtectionWeeklyPercent
 	}
 	if decoded.RetryEnabled != nil {
 		cfg.RetryEnabled = *decoded.RetryEnabled

@@ -47,6 +47,7 @@ type AccountView struct {
 	Cache                CacheClass
 	LastKnownAvailable   bool
 	Exhausted            bool
+	Protected            bool
 	ResetAt              time.Time
 	AuthBlocked          bool
 	Circuit              CircuitClass
@@ -71,7 +72,7 @@ type SelectionResult struct {
 }
 
 func ClassifyAccount(a AccountView, now time.Time) AvailabilityClass {
-	if a.AuthBlocked || a.Circuit == CircuitOpen || a.TemporaryUnavailable || a.Trial != TrialNone {
+	if a.AuthBlocked || a.Protected || a.Circuit == CircuitOpen || a.TemporaryUnavailable || a.Trial != TrialNone {
 		return Excluded
 	}
 	if a.Exhausted && a.ResetAt.After(now) {

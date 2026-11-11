@@ -944,15 +944,19 @@ func (r *QuotaRefresher) refreshDueOnce(version uint64) error {
 		return nil
 	}
 	now := r.now()
-	if !r.state.RefreshActive(now) {
-		return nil
-	}
+	active := r.state.RefreshActive(now)
 	dueAccounts := r.state.DueAccounts(now)
 	dueAuthIDs := make(map[string]struct{}, len(dueAccounts))
 	for _, account := range dueAccounts {
+		if !active && account.Refresh.DueReason != "protection_check_due" {
+			continue
+		}
 		if account.AuthID != "" {
 			dueAuthIDs[account.AuthID] = struct{}{}
 		}
+	}
+	if !active && len(dueAuthIDs) == 0 {
+		return nil
 	}
 	knownAuthIDs := knownAccountAuthIDs(r.state.Snapshot(now))
 	if len(dueAuthIDs) == 0 && len(knownAuthIDs) > 0 {
@@ -1560,8 +1564,10 @@ func (r *QuotaRefresher) nextRefreshLoopDelay() (time.Duration, bool) {
 			deadline = probe
 		}
 	}
-	if legacy := r.state.NextRefreshDueAt(now); !legacy.IsZero() && (deadline.IsZero() || legacy.Before(deadline)) {
-		deadline = legacy
+	if r.normalBackgroundAllowed() {
+		if legacy := r.state.NextRefreshDueAt(now); !legacy.IsZero() && (deadline.IsZero() || legacy.Before(deadline)) {
+			deadline = legacy
+		}
 	}
 	if deadline.IsZero() {
 		return 0, false
@@ -1903,6 +1909,7 @@ func (r *QuotaRefresher) refreshAuthVersionedHeld(auth pluginapi.HostAuthFileEnt
 	if r.state.ApplyQuotaRefreshSuccessIfAdmissionCurrent(account, version, r.now()) {
 		globalTrials.ObserveEvidence(account.Instance, Evidence{Kind: EvidenceReliableQuotaWriteback, At: r.now()})
 		publishSchedulerState(r.state, highestTierSet(r.runtimeRoster()), r.now())
+		r.wakeRefreshLoop()
 		r.recordAdmissionLog(account.AuthID, version, "info", "quota.refresh_success", "账号额度刷新成功", map[string]any{"auth_id": account.AuthID})
 		notifyAuthenticationRecovery(account.AuthID, account.AuthIndex)
 	}

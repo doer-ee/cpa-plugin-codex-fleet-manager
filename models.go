@@ -112,6 +112,7 @@ type AccountAnnotation struct {
 	Tags              []string `json:"tags,omitempty" yaml:"tags,omitempty"`
 	GroupID           string   `json:"group_id,omitempty" yaml:"group_id,omitempty"`
 	SchedulerPriority int      `json:"scheduler_priority,omitempty" yaml:"scheduler_priority,omitempty"`
+	ProtectionEnabled bool     `json:"protection_enabled,omitempty" yaml:"protection_enabled,omitempty"`
 }
 
 type GroupAnnotation struct {
