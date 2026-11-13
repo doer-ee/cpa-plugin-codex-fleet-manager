@@ -6,6 +6,7 @@ import (
 )
 
 const protectionCheckInterval = 5 * time.Minute
+const protectionCheckMarginPercent = 30.0
 
 func float64Ptr(value float64) *float64 { return &value }
 
@@ -40,8 +41,8 @@ func accountProtected(account AccountState, cfg Config) (bool, string) {
 	return false, ""
 }
 
-// A near-threshold account gets a dedicated five-minute quota check. The
-// existing Protected state takes over at the configured threshold.
+// Only a near-threshold five-hour window gets a dedicated five-minute quota
+// check. Weekly quota is protected at its threshold using normal refreshes.
 func protectionCheckDueAt(account AccountState, cfg Config) time.Time {
 	if !account.Annotation.ProtectionEnabled || account.LastSuccessAt.IsZero() || account.Refresh.AuthFailure || account.Refresh.LastFailureKind == RefreshFailureLocal {
 		return time.Time{}
@@ -54,10 +55,9 @@ func protectionCheckDueAt(account AccountState, cfg Config) time.Time {
 			return false
 		}
 		remaining := 100 - *window.UsedPercent
-		return remaining > threshold && remaining < threshold+20
+		return remaining > threshold && remaining < threshold+protectionCheckMarginPercent
 	}
-	if near(account.Quota.FiveHour, protectionThreshold(cfg.ProtectionFiveHourPercent)) ||
-		(account.Family == AccountFamilyWeekly && near(account.Quota.LongWindow, protectionThreshold(cfg.ProtectionWeeklyPercent))) {
+	if near(account.Quota.FiveHour, protectionThreshold(cfg.ProtectionFiveHourPercent)) {
 		due := account.LastSuccessAt.Add(protectionCheckInterval)
 		if retryDue := account.Refresh.LastFailureAt.Add(protectionCheckInterval); account.Refresh.LastFailureKind == RefreshFailureTransient && retryDue.After(due) {
 			due = retryDue

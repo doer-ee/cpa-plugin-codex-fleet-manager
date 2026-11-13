@@ -99,13 +99,15 @@ func TestProtectionNearThresholdFiveMinuteChecks(t *testing.T) {
 	account := weeklyAccount("near", 0, now.Add(7*24*time.Hour), false)
 	account.Annotation.ProtectionEnabled = true
 	account.LastSuccessAt = now
-	weeklyUsed := 70.0 // Exactly 30% remaining is outside the strict below-30% band.
+	weeklyUsed := 20.0
 	account.Quota.LongWindow.UsedPercent = &weeklyUsed
+	fiveHourUsed := 60.0 // Exactly 40% remaining is outside the strict below-40% band.
+	account.Quota.FiveHour.UsedPercent = &fiveHourUsed
 	cfg := DefaultConfig()
 	if due := protectionCheckDueAt(account, cfg); !due.IsZero() {
-		t.Fatalf("30%% remaining scheduled a check at %s", due)
+		t.Fatalf("40%% remaining scheduled a check at %s", due)
 	}
-	weeklyUsed = 70.1
+	fiveHourUsed = 60.1
 	if due := protectionCheckDueAt(account, cfg); !due.Equal(now.Add(5 * time.Minute)) {
 		t.Fatalf("near-threshold due=%s", due)
 	}
@@ -115,7 +117,7 @@ func TestProtectionNearThresholdFiveMinuteChecks(t *testing.T) {
 	if due := protectionCheckDueAt(account, cfg); !due.Equal(now.Add(10 * time.Minute)) {
 		t.Fatalf("failed-check retry due=%s", due)
 	}
-	weeklyUsed = 90.0
+	fiveHourUsed = 90.0
 	if due := protectionCheckDueAt(account, cfg); !due.IsZero() {
 		t.Fatalf("protected account scheduled extra check at %s", due)
 	}
@@ -126,8 +128,10 @@ func TestNearThresholdCheckRemainsDueWhileDormant(t *testing.T) {
 	account := weeklyAccount("near", 0, now.Add(7*24*time.Hour), false)
 	account.Annotation.ProtectionEnabled = true
 	account.LastSuccessAt = now
-	weeklyUsed := 75.0
+	weeklyUsed := 20.0
 	account.Quota.LongWindow.UsedPercent = &weeklyUsed
+	fiveHourUsed := 75.0
+	account.Quota.FiveHour.UsedPercent = &fiveHourUsed
 	store := NewPluginState(DefaultConfig())
 	account.Annotation.ProtectionEnabled = false
 	store.UpsertQuota(account)
@@ -141,5 +145,21 @@ func TestNearThresholdCheckRemainsDueWhileDormant(t *testing.T) {
 	due := store.DueAccounts(now.Add(5 * time.Minute))
 	if len(due) != 1 || due[0].Refresh.DueReason != "protection_check_due" {
 		t.Fatalf("dormant due accounts=%#v", due)
+	}
+}
+
+func TestWeeklyNearThresholdDoesNotTriggerFiveMinuteCheck(t *testing.T) {
+	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	account := weeklyAccount("weekly-near", 0, now.Add(7*24*time.Hour), false)
+	account.Annotation.ProtectionEnabled = true
+	account.LastSuccessAt = now
+	weeklyUsed := 85.0 // 15% weekly remaining: above protection, below its former early-check band.
+	account.Quota.LongWindow.UsedPercent = &weeklyUsed
+	if due := protectionCheckDueAt(account, DefaultConfig()); !due.IsZero() {
+		t.Fatalf("weekly quota alone scheduled an extra check at %s", due)
+	}
+	weeklyUsed = 90.0
+	if protected, reason := accountProtected(account, DefaultConfig()); !protected || reason != "weekly_protected" {
+		t.Fatalf("weekly threshold: protected=%t reason=%q", protected, reason)
 	}
 }

@@ -1508,7 +1508,7 @@ var statusTemplateV2 = template.Must(template.New("status-v2").Funcs(template.Fu
 <label class="toggle"><span data-i18n="settings.handleEnabled">启用调度接管</span><input id="handleEnabled" type="checkbox"></label>
 <label class="field"><span data-i18n="settings.protectionFiveHour">5 小时保护阈值（剩余额度 %）</span><input id="protectionFiveHourPercent" type="number" min="0" max="100" step="0.1" value="10"></label>
 <label class="field"><span data-i18n="settings.protectionWeekly">周额度保护阈值（剩余额度 %）</span><input id="protectionWeeklyPercent" type="number" min="0" max="100" step="0.1" value="10"></label>
-<p class="setting-help wide" data-i18n="settings.protectionMonitorHelp">已开启保护的账号在剩余额度低于阈值加 20 个百分点时，每 5 分钟单独检查一次；达到阈值后停止使用（所有账号均不可用时仍可能进入 CPA 回退）。</p>
+<p class="setting-help wide" data-i18n="settings.protectionMonitorHelp">5 小时额度低于阈值加 30 个百分点时，每 5 分钟单独检查一次。周额度不增加检查频率，只在常规刷新读到达到阈值时进入保护（所有账号均不可用时仍可能进入 CPA 回退）。</p>
 <label class="toggle"><span data-i18n="settings.usageFeedback">失败反馈标记额度耗尽</span><input id="usageFeedback" type="checkbox"></label>
 <div class="setting-with-help wide"><label class="toggle"><span data-i18n="settings.enableResetProbe">自动激活新的额度周期</span><input id="enableResetProbe" name="enable_reset_probe" type="checkbox"></label><p class="setting-help" data-i18n="settings.enableResetProbeHelp">即使普通刷新处于休眠状态，Probe 也会按额度刷新间隔执行只读检查，最短 30 分钟；只有检测到延迟启动的重置窗口时，才发送一次极小请求。可能消耗少量额度。</p></div>
 <div class="setting-with-help wide"><label class="toggle"><span data-i18n="settings.provisionalProbe">账号列表未确认时仍允许额度探测（高风险）</span><input id="probeOnProvisionalRoster" name="probe_on_provisional_roster" type="checkbox"></label><p class="setting-help" data-i18n="settings.provisionalProbeHelp">CPA 暂时无法确认当前账号及优先级时，允许插件使用最近一次保存的账号列表执行额度重置探测。每次都会重新验证账号凭据，但仍无法保证账号未被删除或调整优先级。通常应保持关闭。</p></div>
@@ -1619,7 +1619,7 @@ const TRANSLATIONS={
 };
 TRANSLATIONS.en['settings.protectionFiveHour']='5-hour protection threshold (remaining %)';
 TRANSLATIONS.en['settings.protectionWeekly']='Weekly protection threshold (remaining %)';
-TRANSLATIONS.en['settings.protectionMonitorHelp']='Protected accounts are checked every 5 minutes when remaining quota falls below the threshold plus 20 percentage points. At the threshold, CFM stops selecting them unless all accounts are unavailable and CPA fallback is used.';
+TRANSLATIONS.en['settings.protectionMonitorHelp']='Five-hour quota is checked every 5 minutes when remaining quota falls below its threshold plus 30 percentage points. Weekly quota keeps the normal refresh schedule and enters protection when a refresh reports it at or below its threshold. CPA fallback may still be used if all accounts are unavailable.';
 TRANSLATIONS.en['edit.protection']='Protection mode';
 TRANSLATIONS.en['account.protected']='Protected';
 TRANSLATIONS.en['account.protectionOn']='Protection On';
@@ -1627,7 +1627,7 @@ TRANSLATIONS.en['due.protectionCheck']='Protection check due';
 TRANSLATIONS.en['error.protectionThreshold']='Protection thresholds must be between 0 and 100%.';
 TRANSLATIONS['zh-CN']['settings.protectionFiveHour']='5 小时保护阈值（剩余额度 %）';
 TRANSLATIONS['zh-CN']['settings.protectionWeekly']='周额度保护阈值（剩余额度 %）';
-TRANSLATIONS['zh-CN']['settings.protectionMonitorHelp']='已开启保护的账号在剩余额度低于阈值加 20 个百分点时，每 5 分钟单独检查一次；达到阈值后停止使用（所有账号均不可用时仍可能进入 CPA 回退）。';
+TRANSLATIONS['zh-CN']['settings.protectionMonitorHelp']='5 小时额度低于阈值加 30 个百分点时，每 5 分钟单独检查一次。周额度不增加检查频率，只在常规刷新读到达到阈值时进入保护（所有账号均不可用时仍可能进入 CPA 回退）。';
 TRANSLATIONS['zh-CN']['edit.protection']='保护模式';
 TRANSLATIONS['zh-CN']['account.protected']='受保护';
 TRANSLATIONS['zh-CN']['account.protectionOn']='保护已开启';

@@ -25,6 +25,14 @@ is independently improved and maintained. It is distributed under the MIT
 License and preserves the original project's copyright and license notices. It
 is not an official successor or endorsed release of the original project.
 
+## v0.4.5 Highlights
+
+- Start five-minute checks for protected accounts when five-hour quota falls
+  below the configured threshold plus 30 percentage points (below 40% with
+  the default 10% threshold).
+- Weekly quota no longer triggers early five-minute checks; it remains on the
+  normal refresh schedule and enters Protected at its configured threshold.
+
 ## v0.4.4 Highlights
 
 - Added per-account Protection mode with separate, configurable five-hour and
@@ -97,11 +105,13 @@ quota thresholds separately; both default to 10%. The weekly threshold applies
 to weekly accounts. A missing optional five-hour window does not activate the
 five-hour threshold.
 
-After a successful quota refresh reports less than the relevant threshold plus
-20 percentage points remaining (for example, below 30% for a 10% threshold),
+After a successful refresh reports less than the five-hour threshold plus
+30 percentage points remaining (for example, below 40% for a 10% threshold),
 CFM checks that account every five minutes. These targeted checks continue
-even while routine quota refresh is dormant. At or below the threshold, the
-account shows **Protected** and CFM skips it while another account is usable.
+even while routine quota refresh is dormant. Weekly quota does not trigger
+extra five-minute checks; it enters protection when a normal refresh reports
+remaining weekly quota at or below its threshold. At or below either threshold,
+the account shows **Protected** and CFM skips it while another account is usable.
 The extra five-minute checks stop while it is Protected; the account leaves
 that status only after a successful refresh reports quota above the threshold.
 If every account is unavailable, the existing CPA Fill First fallback may still
