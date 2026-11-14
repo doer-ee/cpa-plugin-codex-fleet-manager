@@ -618,12 +618,13 @@ func retryAttemptModel(exec pluginapi.ExecutorRequest, state retryAttemptState) 
 
 // retryAttemptBody rewrites the requested model and, when the attempt switches
 // models, drops Codex encrypted reasoning items that a different model cannot
-// verify. Attempt zero keeps the body byte-identical.
+// verify. Preserve reserved tool schemas before any attempt, including zero.
 func retryAttemptBody(cfg Config, exec pluginapi.ExecutorRequest, state retryAttemptState) []byte {
 	body := exec.Payload
 	if len(body) == 0 {
 		body = exec.OriginalRequest
 	}
+	body = restoreReservedCollaborationSchemas(body, exec.OriginalRequest)
 	if state.index == 0 || len(body) == 0 {
 		return body
 	}
