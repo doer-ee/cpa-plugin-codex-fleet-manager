@@ -271,6 +271,9 @@ jobs:
       - build-freebsd
     runs-on: ubuntu-24.04
     steps:
+      - name: Checkout release notes
+        uses: actions/checkout@v5
+
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -286,9 +289,13 @@ jobs:
           if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release upload "${GITHUB_REF_NAME}" dist/*.zip dist/checksums.txt --clobber --repo "${GITHUB_REPOSITORY}"
           else
+            notes_args=(--notes "Automated release for ${GITHUB_REF_NAME}.")
+            if [[ -f "docs/releases/${GITHUB_REF_NAME}.md" ]]; then
+              notes_args=(--notes-file "docs/releases/${GITHUB_REF_NAME}.md")
+            fi
             gh release create "${GITHUB_REF_NAME}" dist/*.zip dist/checksums.txt \
               --repo "${GITHUB_REPOSITORY}" \
               --verify-tag \
               --title "${GITHUB_REF_NAME}" \
-              --notes "Automated release for ${GITHUB_REF_NAME}."
+              "${notes_args[@]}"
           fi

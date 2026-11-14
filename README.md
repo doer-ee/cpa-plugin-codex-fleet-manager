@@ -25,6 +25,25 @@ is independently improved and maintained. It is distributed under the MIT
 License and preserves the original project's copyright and license notices. It
 is not an official successor or endorsed release of the original project.
 
+## v0.5.0 Highlights
+
+- Preserves OpenAI-reserved `collaboration` function parameter schemas when
+  CPA rewrites tool types before invoking the CFM retry executor. In particular,
+  restores the client's `wait_agent.timeout_ms` declaration from `integer` to
+  its original `number`, avoiding ChatGPT's reserved-schema rejection.
+- Uses CPA's `OriginalRequest` as the source, leaving unrelated tools, host
+  payload settings, model fallback, and reasoning handling intact.
+- Applies on the initial attempt and fallback attempts, including
+  `input[].additional_tools`. Missing, malformed, or ambiguous originals leave
+  the payload unchanged rather than guessing a schema.
+- Regression tests cover unchanged older-CPA payloads, fallback behavior,
+  reasoning stripping, duplicate namespaces, and additional-tools history.
+
+Compatibility was verified with CPA `v8.0.32` and `v8.0.69` using an isolated
+upstream. A live `gpt-6.1-sol` Responses request with the affected tool type
+also completed successfully on `v8.0.69`. These checks cover this schema
+regression, not every CPA feature or upstream provider.
+
 ## v0.4.5 Highlights
 
 - Start five-minute checks for protected accounts when five-hour quota falls
@@ -518,8 +537,8 @@ make build
 Build release archives and checksums:
 
 ```bash
-make package VERSION=0.1.0
-make checksums VERSION=0.1.0
+make package VERSION=0.5.0
+make checksums VERSION=0.5.0
 ```
 
 Windows users can build `dist/codex-fleet-manager.dll` with:
@@ -530,13 +549,13 @@ Windows users can build `dist/codex-fleet-manager.dll` with:
 
 ## GitHub Releases
 
-Pushing a dotted numeric tag such as `v0.1.0` runs the GitHub Actions release
+Pushing a dotted numeric tag such as `v0.5.0` runs the GitHub Actions release
 workflow. It tests the repository and publishes platform archives plus
 `checksums.txt`:
 
 ```bash
-git tag -a v0.1.0 -m "v0.1.0"
-git push origin v0.1.0
+git tag -a v0.5.0 -m "v0.5.0"
+git push origin v0.5.0
 ```
 
 Release archives use this naming scheme:

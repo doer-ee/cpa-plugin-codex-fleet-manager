@@ -19,6 +19,22 @@ Codex Fleet Manager 基于 Jeffery Zhang 的 Codex Quota Scheduler 改进，
 由独立维护者发布，采用 MIT License，并保留原项目的版权和许可证声明。它不是
 原项目的官方继任版本，也未获原作者背书。
 
+## v0.5.0 主要更新
+
+- 当 CPA 在调用 CFM 重试执行器前改写工具类型时，恢复 OpenAI 保留的
+  `collaboration` 函数参数 schema。特别是将 `wait_agent.timeout_ms` 从
+  改写后的 `integer` 恢复为客户端原始声明的 `number`，避免 ChatGPT 拒绝请求。
+- 以 CPA 的 `OriginalRequest` 为依据，不覆盖其他工具、宿主 payload 设置、
+  模型 fallback 或 reasoning 处理。
+- 初始请求和每次 fallback 都执行恢复，也覆盖 `input[].additional_tools`。
+  原始请求缺失、格式错误或存在歧义时保持原行为，不猜测 schema。
+- 新增旧版 CPA 请求不变、模型切换、reasoning 清理、重复命名空间和
+  additional-tools 历史请求的回归测试。
+
+已使用隔离上游验证 CPA `v8.0.32` 和 `v8.0.69`，并在 `v8.0.69` 上验证了
+携带受影响工具类型的真实 `gpt-6.1-sol` Responses 请求能够成功完成。
+这些检查针对本次 schema 回归，不代表已验证 CPA 的所有功能或上游服务。
+
 ## v0.4.5 主要更新
 
 - 已开启保护的账号在 5 小时剩余额度低于“阈值 + 30 个百分点”时，开始每 5 分钟
@@ -440,8 +456,8 @@ make build
 构建发布压缩包和校验文件：
 
 ```bash
-make package VERSION=0.1.0
-make checksums VERSION=0.1.0
+make package VERSION=0.5.0
+make checksums VERSION=0.5.0
 ```
 
 Windows 用户可以用以下命令构建 `dist/codex-fleet-manager.dll`：
@@ -452,12 +468,12 @@ Windows 用户可以用以下命令构建 `dist/codex-fleet-manager.dll`：
 
 ## GitHub Release
 
-推送 `v0.1.0` 这类点分数字标签后，GitHub Actions 会运行发布流程。流程会测试
+推送 `v0.5.0` 这类点分数字标签后，GitHub Actions 会运行发布流程。流程会测试
 仓库，并发布各平台压缩包和 `checksums.txt`：
 
 ```bash
-git tag -a v0.1.0 -m "v0.1.0"
-git push origin v0.1.0
+git tag -a v0.5.0 -m "v0.5.0"
+git push origin v0.5.0
 ```
 
 发布包使用以下命名方式：
